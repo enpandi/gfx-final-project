@@ -1,9 +1,17 @@
+const MAX_SPHERES = 100;
+
+struct Sphere {
+	color: vec4f,
+	position: vec3f,
+	radius: f32,
+}
+
 struct ShaderState {
-//    pos:array<f32,3>, up:array<f32,3>, forward:array<f32,3>, left:array<f32,3>,
     pos: vec3f,
     up: vec3f,
     forward: vec3f,
     left: vec3f,
+    spheres: array<Sphere, MAX_SPHERES>,
 }
 
 struct VertexOutput {
@@ -12,9 +20,7 @@ struct VertexOutput {
     @location(1) ndc_left: f32,
 }
 
-@group(0)
-@binding(0)
-var<uniform> shader_state: ShaderState;
+@group(0) @binding(0) var<uniform> state: ShaderState;
 
 @vertex
 fn vs_main(
@@ -27,20 +33,28 @@ fn vs_main(
     return VertexOutput(vec4(x, y, 0, 1), y, -x);
 }
 
-const sphere1 = vec3f(0,2,0);
-const sphere2 = vec3(100.0,100.0,100.0);
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let pos = shader_state.pos;
-    let dir = normalize(shader_state.forward + in.ndc_up * shader_state.up + in.ndc_left * shader_state.left);
+    let pos = state.pos;
+    let dir = normalize(state.forward + in.ndc_up * state.up + in.ndc_left * state.left);
     var t = 0.0;
     var hit = false;
+    var hit_color = vec4f(0,0,0,1);
     for (var i = 0; i < 32; i = i + 1) {
         let cur_pos = pos + dir * t;
-        let dist = min(length(cur_pos - sphere1) - 1 , length(cur_pos - sphere2) - 1);
+        var dist = 1e5;
+        var march_color = vec4f(0,0,0,1);
+        for (var s = 0; s < MAX_SPHERES; s = s + 1) {
+            if state.spheres[s].radius == 0.0 { break; }
+            let sdf = length(cur_pos - state.spheres[s].position) - state.spheres[s].radius;
+            if sdf < dist {
+                dist = sdf;
+                march_color = state.spheres[s].color;
+            }
+        }
         if dist < 1e-5 {
             hit = true;
+            hit_color = march_color;
             break;
         }
         if dist > 1e5 {
@@ -48,5 +62,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         }
         t += dist;
     }
-    return vec4(f32(hit), 0, 0, 1);
+    return hit_color;
 }

@@ -1,11 +1,9 @@
 use core::cmp::Ord;
 use encase::{ShaderSize, ShaderType};
-use geometric_algebra::{
-	ppga3d, GeometricProduct, Magnitude, One, Signum, SquaredMagnitude, Transformation,
-};
+use geometric_algebra::{ppga3d, GeometricProduct, One, Signum, Transformation};
 use std::borrow::Cow;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::RawKeyEvent;
+use winit::event::{RawKeyEvent};
 use winit::{
 	event::{DeviceEvent, ElementState, Event, WindowEvent},
 	event_loop::EventLoop,
@@ -13,12 +11,32 @@ use winit::{
 	window::Window,
 };
 
+const MAX_SPHERES: usize = 100;
+
+#[derive(Copy,Clone,Debug,ShaderType)]
+struct Sphere {
+	color: glam::Vec4,
+	position: glam::Vec3,
+	radius: f32,
+}
+
+impl Default for Sphere {
+	fn default() -> Self {
+		Self {
+			color:glam::Vec4::ONE,
+			position:glam::Vec3::ZERO,
+			radius:0.0,
+		}
+	}
+}
+
 #[derive(Debug, ShaderType)]
 struct ShaderState {
-	pub cam_pos: glam::Vec3,
-	pub cam_up: glam::Vec3,
-	pub cam_forward: glam::Vec3,
-	pub cam_left: glam::Vec3,
+	cam_pos: glam::Vec3,
+	cam_up: glam::Vec3,
+	cam_forward: glam::Vec3,
+	cam_left: glam::Vec3,
+	spheres: [Sphere; MAX_SPHERES],
 }
 
 impl ShaderState {
@@ -41,10 +59,15 @@ struct AppState {
 	mouse_delta: glam::Vec2,
 	window_size: PhysicalSize<u32>,
 	fov: f32,
+	num_spheres: usize,
+	sphere_radius: f32,
+	sphere_distance: f32,
+	shader_state: ShaderState,
+	min_frame_time: std::time::Duration,
 }
 
 impl AppState {
-	fn simulate(&mut self) {
+	fn simulate(&mut self, dt: std::time::Duration) {
 		/*
 		q[i+1] = q[i] + h qdot[i]
 		qdot[i+1] = qdot[i] - h * Minv * dV(q[i+1])
@@ -52,12 +75,7 @@ impl AppState {
 		q += h * qdot
 		qdot += h * Minv * F(q)
 		 */
-		let h = {
-			let time = std::time::Instant::now();
-			let h = (time - self.time).as_secs_f32();
-			self.time = time;
-			h
-		};
+		let h = dt.as_secs_f32();
 		let t = {
 			let t = -h
 				* self.speed * (glam::Vec3::from(self.key_plus)
@@ -74,16 +92,32 @@ impl AppState {
 		self.mouse_delta = glam::Vec2::ZERO;
 		self.cam = (self.cam.geometric_product(r).geometric_product(t)).signum();
 	}
-	fn shader_state(&self) -> ShaderState {
+	fn try_make_sphere(&mut self) {
+		if self.num_spheres == MAX_SPHERES {
+			return;
+		}
+		let pos = self.cam.transformation(ppga3d::Point::new(1.0,0.0,0.0,0.0));
+		let dir = self.cam.transformation(ppga3d::Point::new(0.0,0.0,self.sphere_distance,0.0));
+		let sphere_pos = pos + dir;
+		self.shader_state.spheres[self.num_spheres] = Sphere {
+			color: glam::Vec4::new(rand::random(),rand::random(),rand::random(),1.0),
+			position: glam::Vec3::new(sphere_pos[1],sphere_pos[2],sphere_pos[3]),
+			radius: self.sphere_radius,
+		};
+		self.num_spheres += 1;
+	}
+	fn shader_state(&mut self) -> &ShaderState {
 		let cam_pos = self
 			.cam
 			.transformation(ppga3d::Point::new(1.0, 0.0, 0.0, 0.0));
+		self.shader_state.cam_pos = glam::Vec3::new(cam_pos[1], cam_pos[2], cam_pos[3]);
 		let cam_up = self.cam.transformation(ppga3d::Point::new(
 			0.0,
 			self.window_size.height as f32,
 			0.0,
 			0.0,
 		));
+		self.shader_state.cam_up = glam::Vec3::new(cam_up[1], cam_up[2], cam_up[3]);
 		let cam_forward = self.cam.transformation(ppga3d::Point::new(
 			0.0,
 			0.0,
@@ -92,18 +126,16 @@ impl AppState {
 				.sqrt() / (0.5 * self.fov).tan(),
 			0.0,
 		));
+		self.shader_state.cam_forward =
+			glam::Vec3::new(cam_forward[1], cam_forward[2], cam_forward[3]);
 		let cam_left = self.cam.transformation(ppga3d::Point::new(
 			0.0,
 			0.0,
 			0.0,
 			self.window_size.width as f32,
 		));
-		ShaderState {
-			cam_pos: glam::Vec3::new(cam_pos[1], cam_pos[2], cam_pos[3]),
-			cam_up: glam::Vec3::new(cam_up[1], cam_up[2], cam_up[3]),
-			cam_forward: glam::Vec3::new(cam_forward[1], cam_forward[2], cam_forward[3]),
-			cam_left: glam::Vec3::new(cam_left[1], cam_left[2], cam_left[3]),
-		}
+		self.shader_state.cam_left = glam::Vec3::new(cam_left[1], cam_left[2], cam_left[3]);
+		&self.shader_state
 	}
 }
 
@@ -117,6 +149,17 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		mouse_delta: glam::Vec2::ZERO,
 		window_size: window.inner_size(),
 		fov: std::f32::consts::FRAC_PI_2,
+		num_spheres: 0,
+		sphere_radius: 1.0,
+		sphere_distance: 4.0,
+		shader_state: ShaderState {
+			cam_pos: glam::Vec3::ZERO,
+			cam_up: glam::Vec3::ZERO,
+			cam_forward: glam::Vec3::ZERO,
+			cam_left: glam::Vec3::ZERO,
+			spheres: [Sphere::default(); MAX_SPHERES],
+		},
+		min_frame_time: std::time::Duration::from_nanos(1000000000/60),
 	};
 	app_state.window_size.width = app_state.window_size.width.max(1);
 	app_state.window_size.height = app_state.window_size.height.max(1);
@@ -222,6 +265,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 			app_state.window_size.height,
 		)
 		.unwrap();
+	config.present_mode = wgpu::PresentMode::AutoVsync;
 	surface.configure(&device, &config);
 
 	let window = &window;
@@ -249,6 +293,26 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 					}
 					DeviceEvent::MouseWheel { delta } => {
 						dbg!(delta);
+					}
+					DeviceEvent::Button { button, state } => {
+						let pressed = state == ElementState::Pressed;
+						match button {
+							0 => {
+								// mouse left
+								if pressed {
+									app_state.try_make_sphere();
+								}
+							}
+							1 => {
+								// mouse right
+							}
+							2 => {
+								// mouse middle
+							}
+							_ => {
+								dbg!(button);
+							}
+						}
 					}
 					DeviceEvent::Key(RawKeyEvent {
 						physical_key,
@@ -281,7 +345,15 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						window.request_redraw();
 					}
 					WindowEvent::RedrawRequested => {
-						app_state.simulate();
+						let target_time = app_state.time + app_state.min_frame_time;
+						let time = std::time::Instant::now();
+						if time < target_time {
+							std::thread::sleep(target_time- time);
+						}
+						let time = std::time::Instant::now();
+						let dt = time - app_state.time;
+						app_state.simulate(dt);
+						app_state.time = time;
 						let frame = surface
 							.get_current_texture()
 							.expect("Failed to acquire next swap chain texture");
