@@ -1,7 +1,10 @@
 use core::cmp::Ord;
 use encase::{ShaderSize, ShaderType};
-use geometric_algebra::{ppga3d, GeometricProduct, Inverse, One, Transformation, Zero, OuterProduct, Magnitude};
+use geometric_algebra::{
+	ppga3d, GeometricProduct, Magnitude, One, Signum, SquaredMagnitude, Transformation,
+};
 use std::borrow::Cow;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::RawKeyEvent;
 use winit::{
 	event::{DeviceEvent, ElementState, Event, WindowEvent},
@@ -33,70 +36,74 @@ struct AppState {
 	time: std::time::Instant,
 	speed: f32,
 	cam: ppga3d::Motor,
-	key_up: bool,
-	key_down: bool,
-	key_forward: bool,
-	key_backward: bool,
-	key_left: bool,
-	key_right: bool,
-	mouse_dx: f32,
-	mouse_dy: f32,
-	tmpl_up: ppga3d::Point,
-	tmpl_forward: ppga3d::Point,
-	tmpl_left: ppga3d::Point,
+	key_plus: glam::BVec3,
+	key_minus: glam::BVec3,
+	mouse_delta: glam::Vec2,
+	window_size: PhysicalSize<u32>,
+	fov: f32,
 }
 
 impl AppState {
 	fn simulate(&mut self) {
-		let time = std::time::Instant::now();
-		let h = (time - self.time).as_secs_f32();
-		self.time = time;
-		let t = ppga3d::Translator::new(
-			1.0,
-			h * self.speed * (f32::from(self.key_down) - f32::from(self.key_up)),
-			h * self.speed * (f32::from(self.key_backward) - f32::from(self.key_forward)),
-			h * self.speed * (f32::from(self.key_right) - f32::from(self.key_left)),
-		);
-		let r = {
-			let r = ppga3d::Rotor::new(1.0, self.mouse_dy*self.tmpl_left[3]*1e-2, 0.0, self.mouse_dx*self.tmpl_up[1]*1e-2);
-			r * (1.0 / r.magnitude())
+		/*
+		q[i+1] = q[i] + h qdot[i]
+		qdot[i+1] = qdot[i] - h * Minv * dV(q[i+1])
+		===
+		q += h * qdot
+		qdot += h * Minv * F(q)
+		 */
+		let h = {
+			let time = std::time::Instant::now();
+			let h = (time - self.time).as_secs_f32();
+			self.time = time;
+			h
 		};
-		self.mouse_dx = 0.0;
-		self.mouse_dy = 0.0;
-		self.cam = r.geometric_product(t).geometric_product(self.cam);
-		// dbg!(self.cam);
-		// std::thread::sleep(std::time::Duration::from_millis(100));
+		let t = {
+			let t = -h
+				* self.speed * (glam::Vec3::from(self.key_plus)
+				- glam::Vec3::from(self.key_minus));
+			ppga3d::Translator::new(1.0, t.x, t.y, t.z)
+		};
+		let r = ppga3d::Rotor::new(
+			1.0,
+			self.mouse_delta.x * 1e-3,
+			0.0,
+			-self.mouse_delta.y * 1e-3,
+		)
+		.signum();
+		self.mouse_delta = glam::Vec2::ZERO;
+		self.cam = (self.cam.geometric_product(r).geometric_product(t)).signum();
 	}
 	fn shader_state(&self) -> ShaderState {
-		// TODO this is probably abuse of geometric algebra
 		let cam_pos = self
 			.cam
 			.transformation(ppga3d::Point::new(1.0, 0.0, 0.0, 0.0));
-		let cam_up = self
-			.cam
-			.transformation(self.tmpl_up);
-		let cam_forward = self
-			.cam
-			.transformation(self.tmpl_forward);
-		let cam_left = self
-			.cam
-			.transformation(self.tmpl_left);
-		// dbg!(cam_pos, cam_up, cam_forward, cam_left);
-		// std::thread::sleep(std::time::Duration::from_millis(100));
+		let cam_up = self.cam.transformation(ppga3d::Point::new(
+			0.0,
+			self.window_size.height as f32,
+			0.0,
+			0.0,
+		));
+		let cam_forward = self.cam.transformation(ppga3d::Point::new(
+			0.0,
+			0.0,
+			((self.window_size.width * self.window_size.width
+				+ self.window_size.height * self.window_size.height) as f32)
+				.sqrt() / (0.5 * self.fov).tan(),
+			0.0,
+		));
+		let cam_left = self.cam.transformation(ppga3d::Point::new(
+			0.0,
+			0.0,
+			0.0,
+			self.window_size.width as f32,
+		));
 		ShaderState {
 			cam_pos: glam::Vec3::new(cam_pos[1], cam_pos[2], cam_pos[3]),
 			cam_up: glam::Vec3::new(cam_up[1], cam_up[2], cam_up[3]),
 			cam_forward: glam::Vec3::new(cam_forward[1], cam_forward[2], cam_forward[3]),
 			cam_left: glam::Vec3::new(cam_left[1], cam_left[2], cam_left[3]),
 		}
-	}
-	fn set_fov(&mut self, fov: f32) {
-		self.tmpl_forward = ppga3d::Point::new(0.0, 0.0, 1.0 / (0.5*fov).tan(), 0.0);
-	}
-	fn set_aspect_ratio(&mut self, width:u32,height:u32) {
-		let inv_hyp = 1.0 / ((width as f32).hypot(height as f32));
-		self.tmpl_up = ppga3d::Point::new(0.0, height as f32 * inv_hyp,0.0,0.0);
-		self.tmpl_left = ppga3d::Point::new(0.0,0.0,0.0, width as f32 * inv_hyp);
 	}
 }
 
@@ -105,23 +112,14 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		time: std::time::Instant::now(),
 		speed: 1.0,
 		cam: ppga3d::Motor::one(),
-		key_up: false,
-		key_down: false,
-		key_forward: false,
-		key_backward: false,
-		key_left: false,
-		key_right: false,
-		mouse_dx:0.0,
-		mouse_dy:0.0,
-		tmpl_up:ppga3d::Point::zero(),
-		tmpl_forward:ppga3d::Point::zero(),
-		tmpl_left:ppga3d::Point::zero(),
+		key_plus: glam::BVec3::FALSE,
+		key_minus: glam::BVec3::FALSE,
+		mouse_delta: glam::Vec2::ZERO,
+		window_size: window.inner_size(),
+		fov: std::f32::consts::FRAC_PI_2,
 	};
-	app_state.set_fov(std::f32::consts::FRAC_PI_2);
-	let mut size = window.inner_size();
-	size.width = size.width.max(1);
-	size.height = size.height.max(1);
-	app_state.set_aspect_ratio(size.width,size.height);
+	app_state.window_size.width = app_state.window_size.width.max(1);
+	app_state.window_size.height = app_state.window_size.height.max(1);
 
 	let instance = wgpu::Instance::default();
 
@@ -218,13 +216,18 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 	});
 
 	let mut config = surface
-		.get_default_config(&adapter, size.width, size.height)
+		.get_default_config(
+			&adapter,
+			app_state.window_size.width,
+			app_state.window_size.height,
+		)
 		.unwrap();
 	surface.configure(&device, &config);
 
 	let window = &window;
 	// window .set_cursor_grab(CursorGrabMode::Confined) .expect("set_cursor_grab failed");
 	// event_loop.set_control_flow(ControlFlow::Poll);
+	window.set_cursor_visible(false);
 	event_loop
 		.run(move |event, target| {
 			// Have the closure take ownership of the resources.
@@ -235,8 +238,14 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 			match event {
 				Event::DeviceEvent { event, .. } => match event {
 					DeviceEvent::MouseMotion { delta: (x, y) } => {
-						app_state.mouse_dx += x as f32;
-						app_state.mouse_dy += y as f32;
+						app_state.mouse_delta.x += x as f32;
+						app_state.mouse_delta.y += y as f32;
+						window
+							.set_cursor_position(PhysicalPosition::new(
+								app_state.window_size.width >> 1,
+								app_state.window_size.height >> 1,
+							))
+							.expect("unable to set cursor position");
 					}
 					DeviceEvent::MouseWheel { delta } => {
 						dbg!(delta);
@@ -248,12 +257,12 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						if let PhysicalKey::Code(key_code) = physical_key {
 							let pressed = state == ElementState::Pressed;
 							match key_code {
-								KeyCode::Space => app_state.key_up = pressed,
-								KeyCode::ShiftLeft => app_state.key_down = pressed,
-								KeyCode::KeyW => app_state.key_forward = pressed,
-								KeyCode::KeyS => app_state.key_backward = pressed,
-								KeyCode::KeyA => app_state.key_left = pressed,
-								KeyCode::KeyD => app_state.key_right = pressed,
+								KeyCode::Space => app_state.key_plus.x = pressed,
+								KeyCode::ShiftLeft => app_state.key_minus.x = pressed,
+								KeyCode::KeyW => app_state.key_plus.y = pressed,
+								KeyCode::KeyS => app_state.key_minus.y = pressed,
+								KeyCode::KeyA => app_state.key_plus.z = pressed,
+								KeyCode::KeyD => app_state.key_minus.z = pressed,
 								_ => {}
 							}
 						}
@@ -265,7 +274,8 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						// Reconfigure the surface with the new size
 						config.width = new_size.width.max(1);
 						config.height = new_size.height.max(1);
-						app_state.set_aspect_ratio(config.width,config.height);
+						app_state.window_size.width = config.width;
+						app_state.window_size.height = config.height;
 						surface.configure(&device, &config);
 						// On macos the window needs to be redrawn manually after resizing
 						window.request_redraw();

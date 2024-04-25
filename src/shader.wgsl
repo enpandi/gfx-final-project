@@ -33,13 +33,13 @@ const sphere2 = vec3(100.0,100.0,100.0);
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let pos = shader_state.pos;
-    let dir = shader_state.forward + in.ndc_up * shader_state.up + in.ndc_left * shader_state.left;
+    let dir = normalize(shader_state.forward + in.ndc_up * shader_state.up + in.ndc_left * shader_state.left);
     var t = 0.0;
     var hit = false;
     for (var i = 0; i < 32; i = i + 1) {
         let cur_pos = pos + dir * t;
         let dist = min(length(cur_pos - sphere1) - 1 , length(cur_pos - sphere2) - 1);
-        if dist < 1e-3 {
+        if dist < 1e-5 {
             hit = true;
             break;
         }
