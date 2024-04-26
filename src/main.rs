@@ -3,7 +3,8 @@ use encase::{ShaderSize, ShaderType};
 use geometric_algebra::{ppga3d, GeometricProduct, One, Signum, Transformation};
 use std::borrow::Cow;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{RawKeyEvent};
+use winit::event::MouseScrollDelta::LineDelta;
+use winit::event::RawKeyEvent;
 use winit::{
 	event::{DeviceEvent, ElementState, Event, WindowEvent},
 	event_loop::EventLoop,
@@ -11,21 +12,21 @@ use winit::{
 	window::Window,
 };
 
-const MAX_SPHERES: usize = 100;
+const MAX_SPHERES: usize = 16;
 
-#[derive(Copy,Clone,Debug,ShaderType)]
+#[derive(Copy, Clone, Debug, ShaderType)]
 struct Sphere {
 	color: glam::Vec4,
-	position: glam::Vec3,
+	center: glam::Vec3,
 	radius: f32,
 }
 
 impl Default for Sphere {
 	fn default() -> Self {
 		Self {
-			color:glam::Vec4::ONE,
-			position:glam::Vec3::ZERO,
-			radius:0.0,
+			color: glam::Vec4::ONE,
+			center: glam::Vec3::ZERO,
+			radius: 0.0,
 		}
 	}
 }
@@ -36,6 +37,10 @@ struct ShaderState {
 	cam_up: glam::Vec3,
 	cam_forward: glam::Vec3,
 	cam_left: glam::Vec3,
+	light_global_color: glam::Vec3,
+	light_source_pos: glam::Vec3,
+	light_source_color: glam::Vec3,
+	floor_x: f32,
 	spheres: [Sphere; MAX_SPHERES],
 }
 
@@ -53,17 +58,19 @@ impl ShaderState {
 struct AppState {
 	time: std::time::Instant,
 	speed: f32,
+	gravity_g: f32,
 	cam: ppga3d::Motor,
 	key_plus: glam::BVec3,
 	key_minus: glam::BVec3,
-	mouse_delta: glam::Vec2,
+	mouse_delta: glam::Vec3,
 	window_size: PhysicalSize<u32>,
 	fov: f32,
 	num_spheres: usize,
 	sphere_radius: f32,
 	sphere_distance: f32,
+	min_frame_time: Option<std::time::Duration>,
+	sphere_vels: [glam::Vec3; MAX_SPHERES],
 	shader_state: ShaderState,
-	min_frame_time: std::time::Duration,
 }
 
 impl AppState {
@@ -76,6 +83,19 @@ impl AppState {
 		qdot += h * Minv * F(q)
 		 */
 		let h = dt.as_secs_f32();
+		// physics simulation
+		{
+			let hg = h * self.gravity_g;
+			for i in 0..self.num_spheres {
+				self.shader_state.spheres[i].center += h * self.sphere_vels[i];
+				self.sphere_vels[i] += hg * glam::Vec3::X;
+				if self.shader_state.spheres[i].center.x < 0.0 {
+					self.shader_state.spheres[i].center.x = -self.shader_state.spheres[i].center.x;
+					self.sphere_vels[i].x = -self.sphere_vels[i].x;
+				}
+			}
+		}
+		// camera update
 		let t = {
 			let t = -h
 				* self.speed * (glam::Vec3::from(self.key_plus)
@@ -85,23 +105,27 @@ impl AppState {
 		let r = ppga3d::Rotor::new(
 			1.0,
 			self.mouse_delta.x * 1e-3,
-			0.0,
+			self.mouse_delta.z * 1e-1,
 			-self.mouse_delta.y * 1e-3,
 		)
 		.signum();
-		self.mouse_delta = glam::Vec2::ZERO;
+		self.mouse_delta = glam::Vec3::ZERO;
 		self.cam = (self.cam.geometric_product(r).geometric_product(t)).signum();
 	}
 	fn try_make_sphere(&mut self) {
 		if self.num_spheres == MAX_SPHERES {
 			return;
 		}
-		let pos = self.cam.transformation(ppga3d::Point::new(1.0,0.0,0.0,0.0));
-		let dir = self.cam.transformation(ppga3d::Point::new(0.0,0.0,self.sphere_distance,0.0));
+		let pos = self
+			.cam
+			.transformation(ppga3d::Point::new(1.0, 0.0, 0.0, 0.0));
+		let dir = self
+			.cam
+			.transformation(ppga3d::Point::new(0.0, 0.0, self.sphere_distance, 0.0));
 		let sphere_pos = pos + dir;
 		self.shader_state.spheres[self.num_spheres] = Sphere {
-			color: glam::Vec4::new(rand::random(),rand::random(),rand::random(),1.0),
-			position: glam::Vec3::new(sphere_pos[1],sphere_pos[2],sphere_pos[3]),
+			color: glam::Vec4::new(rand::random(), rand::random(), rand::random(), 1.0),
+			center: glam::Vec3::new(sphere_pos[1], sphere_pos[2], sphere_pos[3]),
 			radius: self.sphere_radius,
 		};
 		self.num_spheres += 1;
@@ -143,23 +167,29 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 	let mut app_state = AppState {
 		time: std::time::Instant::now(),
 		speed: 1.0,
+		gravity_g: -10.0,
 		cam: ppga3d::Motor::one(),
 		key_plus: glam::BVec3::FALSE,
 		key_minus: glam::BVec3::FALSE,
-		mouse_delta: glam::Vec2::ZERO,
+		mouse_delta: glam::Vec3::ZERO,
 		window_size: window.inner_size(),
 		fov: std::f32::consts::FRAC_PI_2,
 		num_spheres: 0,
 		sphere_radius: 1.0,
 		sphere_distance: 4.0,
+		min_frame_time: None,
+		sphere_vels: [glam::Vec3::ZERO; MAX_SPHERES],
 		shader_state: ShaderState {
 			cam_pos: glam::Vec3::ZERO,
 			cam_up: glam::Vec3::ZERO,
 			cam_forward: glam::Vec3::ZERO,
 			cam_left: glam::Vec3::ZERO,
+			light_global_color: glam::Vec3::ONE * 0.125,
+			light_source_pos: glam::Vec3::X * 128.0,
+			light_source_color: glam::Vec3::ONE,
+			floor_x: 0.0,
 			spheres: [Sphere::default(); MAX_SPHERES],
 		},
-		min_frame_time: std::time::Duration::from_nanos(1000000000/60),
 	};
 	app_state.window_size.width = app_state.window_size.width.max(1);
 	app_state.window_size.height = app_state.window_size.height.max(1);
@@ -292,25 +322,36 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 							.expect("unable to set cursor position");
 					}
 					DeviceEvent::MouseWheel { delta } => {
-						dbg!(delta);
+						if let LineDelta(_, y) = delta {
+							app_state.fov *= 0.99f32.powi(y as i32);
+						} else {
+							dbg!(delta);
+						}
 					}
 					DeviceEvent::Button { button, state } => {
-						let pressed = state == ElementState::Pressed;
-						match button {
-							0 => {
-								// mouse left
-								if pressed {
+						if state == ElementState::Pressed {
+							match button {
+								0 => {
+									// mouse left
 									app_state.try_make_sphere();
 								}
-							}
-							1 => {
-								// mouse right
-							}
-							2 => {
-								// mouse middle
-							}
-							_ => {
-								dbg!(button);
+								1 => {
+									// mouse right
+								}
+								2 => {
+									// mouse middle
+								}
+								3 => {
+									// mouse back
+									app_state.mouse_delta.z += 1.0;
+								}
+								4 => {
+									// mouse front
+									app_state.mouse_delta.z -= 1.0;
+								}
+								_ => {
+									dbg!(button);
+								}
 							}
 						}
 					}
@@ -345,15 +386,18 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						window.request_redraw();
 					}
 					WindowEvent::RedrawRequested => {
-						let target_time = app_state.time + app_state.min_frame_time;
-						let time = std::time::Instant::now();
-						if time < target_time {
-							std::thread::sleep(target_time- time);
+						if let Some(min_frame_time) = app_state.min_frame_time {
+							let target_time = app_state.time + min_frame_time;
+							let time = std::time::Instant::now();
+							if time < target_time {
+								std::thread::sleep(target_time - time);
+							}
 						}
 						let time = std::time::Instant::now();
 						let dt = time - app_state.time;
-						app_state.simulate(dt);
+						// dbg!(1.0 / dt.as_secs_f32());
 						app_state.time = time;
+						app_state.simulate(dt);
 						let frame = surface
 							.get_current_texture()
 							.expect("Failed to acquire next swap chain texture");
