@@ -1,47 +1,224 @@
-use core::cmp::Ord;
-use encase::{ShaderSize, ShaderType};
-use geometric_algebra::{ppga3d, GeometricProduct, One, Signum, Transformation};
-use std::borrow::Cow;
-use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::MouseScrollDelta::LineDelta;
-use winit::event::RawKeyEvent;
+use encase::{impl_vector, ShaderSize, ShaderType};
+use encase::vector::FromVectorParts;
+use geometric_algebra::{pga3d::*, *};
+use glam::Vec3;
 use winit::{
-	event::{DeviceEvent, ElementState, Event, WindowEvent},
+	dpi::{PhysicalPosition, PhysicalSize},
+	event::{
+		DeviceEvent, ElementState, Event, MouseScrollDelta::LineDelta, RawKeyEvent, WindowEvent,
+	},
 	event_loop::EventLoop,
 	keyboard::{KeyCode, PhysicalKey},
-	window::Window,
+	window::{Window, WindowBuilder},
 };
 
-const MAX_SPHERES: usize = 16;
+// switch between 3D and 4D (TODO implement 4D)
+const N: usize = 3;
+type VecN = glam::Vec3;
+type BVecN = glam::BVec3;
+const WGSL_GEOMETRIC_ALGEBRA: &str = include_str!("../geometric_algebra/src/pga3d.wgsl");
+const AXES: [Point; N] = [
+	Point::new(1.0, 0.0, 0.0, 0.0),
+	Point::new(0.0, 1.0, 0.0, 0.0),
+	Point::new(0.0, 0.0, 1.0, 0.0),
+];
+const ORIGIN: Point = Point::new(0.0, 0.0, 0.0, 1.0);
 
-#[derive(Copy, Clone, Debug, ShaderType)]
-struct Sphere {
-	color: glam::Vec4,
-	center: glam::Vec3,
-	radius: f32,
+// don't change dimensions after this
+//static GRAVITY_SIGNUM: Line = -AXES[0].regressive_product(ORIGIN + AXES[0]);
+const MAX_POINT_LIGHTS: usize = 1;
+const MAX_BODIES: usize = 16;
+
+static SHADER_WGSL: &str = const_format::concatcp!(
+	WGSL_GEOMETRIC_ALGEBRA,
+	"const N = ",
+	N,
+	";alias vecN = vec",
+	N,
+	"f;const MAX_POINT_LIGHTS = ",
+	MAX_POINT_LIGHTS,
+	";const MAX_BODIES = ",
+	MAX_BODIES,
+	";const ORIGIN = Point(vecN(), 1.0);",
+	include_str!("shader.wgsl"),
+);
+
+#[derive(Debug, Clone)]
+struct Camera {
+	motion: Motor,
+	// fov: f32,
+	up: Point,
+	forward: Point,
+	left: Point,
 }
 
-impl Default for Sphere {
-	fn default() -> Self {
-		Self {
-			color: glam::Vec4::ONE,
-			center: glam::Vec3::ZERO,
-			radius: 0.0,
+
+#[derive(Debug, ShaderType)]
+struct ShaderPoint {
+	#[align(16)]
+	g0: VecN,
+	// #[align(16)]
+	g1: f32
+}
+impl From<Point> for ShaderPoint {
+	fn from(point: Point) -> Self {
+		Self{
+			g0: {
+				let mut g0 = VecN::ZERO;
+				for i in 0..N {
+					g0[i] = point[i];
+				}
+				g0
+			},
+			g1: point[N],
 		}
 	}
 }
-
+#[derive(Debug,ShaderType)]
+struct ShaderMotor {
+	#[align(16)]
+	g0: VecN,
+	#[align(16)]
+	g1:VecN,
+	#[align(16)]
+	g2:glam::Vec2,
+}
+impl From<Motor> for ShaderMotor {
+	fn from(motor: Motor) -> Self {
+		Self{
+			g0:{
+				let mut g0=VecN::ZERO;
+				for i in 0..N {
+					g0[i]=motor[i];
+				}
+				g0
+			},
+			g1:{
+				let mut g1=VecN::ZERO;
+				for i in 0..N {
+					g1[i]=motor[i+N];
+				}
+				g1
+			},
+			g2:glam::Vec2::new(motor[N+N],motor[N+N+1]),
+		}
+	}
+}
 #[derive(Debug, ShaderType)]
+struct ShaderCamera {
+	#[align(16)]
+	motion: ShaderMotor,
+	#[align(16)]
+	up: ShaderPoint,
+	#[align(16)]
+	forward: ShaderPoint,
+	#[align(16)]
+	left: ShaderPoint,
+}
+impl From<Camera> for ShaderCamera {
+	fn from(camera: Camera) -> Self {
+		ShaderCamera {
+			motion: camera.motion.into(),
+			up: camera.up.into(),
+			forward: camera.forward.into(),
+			left: camera.left.into(),
+			// fov: camera.fov,
+		}
+	}
+}
+#[derive(Debug, Clone)]
+struct PointLight {
+	color: Vec3,
+	position: Point,
+}
+#[derive(Debug, ShaderType)]
+struct ShaderPointLight {
+	#[align(16)]
+	color: Vec3,
+	#[align(16)]
+	position: ShaderPoint,
+}
+impl From<PointLight> for ShaderPointLight {
+	fn from(point_light: PointLight) -> Self {
+		Self {
+			color:point_light.color,
+			position: point_light.position.into(),
+		}
+	}
+}
+// no need for a separate ShaderMaterial
+#[derive(Clone, Debug, ShaderType)]
+struct Material {
+	ambient: Vec3,
+	diffuse: Vec3,
+}
+#[derive(Clone, Debug)]
+enum Shape {
+	Sphere(f32),
+	Box(VecN),
+}
+#[derive(Debug, ShaderType)]
+struct ShaderShape {
+	#[align(16)]
+	params: VecN,
+}
+impl From<Shape> for ShaderShape {
+	fn from(shape: Shape) -> Self {
+		Self {
+			params:
+				match shape {
+					Shape::Sphere(radius) => VecN::X * radius,
+					Shape::Box(half_widths) => half_widths,
+			},
+		}
+	}
+}
+#[derive(Clone, Debug)]
+struct Body {
+	motion: Motor,   // "position"
+	rate: Line,      // "velocity"
+	prev_rate: Line, // for contact resolution
+	shape: Shape,
+	material: Material,
+}
+#[derive(Debug, ShaderType)]
+struct ShaderBody {
+	#[align(16)]
+	motion: ShaderMotor,
+    #[align(16)]
+	shape: ShaderShape,
+    #[align(16)]
+	material: Material,
+}
+impl From<Body> for ShaderBody {
+	fn from(body: Body) -> Self {
+		Self {
+			motion: body.motion.into(),
+			shape: body.shape.into(),
+			material: body.material,
+		}
+	}
+}
+/*
+#[derive(Copy, Clone, Debug, ShaderType)]
+struct Sphere {
+	center: VecN,
+	radius: f32,
+	material: Material,
+}
+#[derive(Copy, Clone, Debug, ShaderType)]
+struct Box {
+	center: VecN,
+	half_widths: VecN,
+	material: Material,
+}
+#[derive(Debug)]
 struct ShaderState {
-	cam_pos: glam::Vec3,
-	cam_up: glam::Vec3,
-	cam_forward: glam::Vec3,
-	cam_left: glam::Vec3,
-	light_global_color: glam::Vec3,
-	light_source_pos: glam::Vec3,
-	light_source_color: glam::Vec3,
+	camera: Camera,
+	scene_global_color: Vec3,
+	point_lights: [PointLight; MAX_POINT_LIGHTS],
 	floor_x: f32,
-	spheres: [Sphere; MAX_SPHERES],
+	bodies: [Body; MAX_BODIES],
 }
 
 impl ShaderState {
@@ -53,27 +230,66 @@ impl ShaderState {
 		Ok(buffer.into_inner())
 	}
 }
+*/
 
 #[derive(Debug)]
 struct AppState {
+	// controls
+	key_plus: BVecN,
+	key_minus: BVecN,
+	mouse_delta: VecN,
+	window_size: PhysicalSize<u32>,
+	// physics
 	time: std::time::Instant,
 	speed: f32,
-	gravity_g: f32,
-	cam: ppga3d::Motor,
-	key_plus: glam::BVec3,
-	key_minus: glam::BVec3,
-	mouse_delta: glam::Vec3,
-	window_size: PhysicalSize<u32>,
-	fov: f32,
-	num_spheres: usize,
-	sphere_radius: f32,
-	sphere_distance: f32,
-	min_frame_time: Option<std::time::Duration>,
-	sphere_vels: [glam::Vec3; MAX_SPHERES],
-	shader_state: ShaderState,
+	gravity_magnitude: f32,
+	place_distance: f32,
+	place_shape: Shape,
+	// render
+	camera: Camera,
+	global_light_color: Vec3,
+	point_lights: [PointLight; MAX_POINT_LIGHTS],
+	num_bodies: usize,
+	bodies: [Body; MAX_BODIES],
+	floor: Plane,
+}
+#[derive(Debug, ShaderType)]
+struct ShaderState {
+	#[align(16)]
+	camera: ShaderCamera,
+	#[align(16)]
+	global_light_color: Vec3,
+	#[align(16)]
+	point_lights: [ShaderPointLight; MAX_POINT_LIGHTS],
+	#[align(16)]
+	bodies: [ShaderBody; MAX_BODIES],
+}
+impl From<&AppState> for ShaderState {
+	fn from(state: &AppState) -> Self {
+		Self {
+			camera: ShaderCamera::from(state.camera.clone()),
+			global_light_color:state.global_light_color,
+			point_lights: state.point_lights.clone().map(ShaderPointLight::from),
+			bodies: state.bodies.clone().map(ShaderBody::from),
+		}
+	}
 }
 
 impl AppState {
+	fn as_wgsl_bytes(&self) -> encase::internal::Result<Vec<u8>> {
+		let mut buffer = encase::UniformBuffer::new(Vec::new());
+		buffer
+			.write(&ShaderState::from(self))
+			.expect("encase::UniformBuffer::write error");
+		// dbg!(&self.camera, &self.bodies[..self.num_bodies]);
+		if false {
+			dbg!(buffer.as_ref().chunks(4).map(TryInto::try_into)
+				.map(Result::unwrap)
+				.map(f32::from_le_bytes)
+				.collect::<Vec<_>>());
+		}
+		Ok(buffer.into_inner())
+	}
 	fn simulate(&mut self, dt: std::time::Duration) {
 		/*
 		q[i+1] = q[i] + h qdot[i]
@@ -84,65 +300,112 @@ impl AppState {
 		 */
 		let h = dt.as_secs_f32();
 		// physics simulation
+		#[cfg(any())]
 		{
-			let hg = h * self.gravity_g;
-			for i in 0..self.num_spheres {
-				self.shader_state.spheres[i].center += h * self.sphere_vels[i];
-				self.sphere_vels[i] += hg * glam::Vec3::X;
-				if self.shader_state.spheres[i].center.x < 0.0 {
-					self.shader_state.spheres[i].center.x = -self.shader_state.spheres[i].center.x;
-					self.sphere_vels[i].x = -self.sphere_vels[i].x;
+			let hg = -AXES[0].regressive_product(ORIGIN + AXES[0]) * (h * self.gravity_magnitude);
+			for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
+				let mut mnext = body.motion + body.rate * h;
+				match body.shape {
+					Shape::Sphere(r) => {
+						// ?? do some projection shit
+					}
+					Shape::Box(half_widths) => {
+						// more projection shit
+					}
 				}
+				body.prev_rate = body.rate;
+				body.motion = mnext;
+				// https://enki.ws/ganja.js/examples/pga_dyn.html#Collision_Response
+				body.rate += body.motion.reversal().transformation(hg).dual();
+				// wtf
 			}
+			/*
+			for i in 0..self.num_spheres {
+				let mut qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
+				if qnext.x < 0.0 {
+					self.sphere_vels[i].x = -self.sphere_prev_vels[i].x;
+					qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
+				}
+				self.sphere_prev_vels[i] = self.sphere_vels[i];
+				self.shader_state.spheres[i].center = qnext;
+				self.sphere_vels[i].x += hg;
+			}
+			for i in 0..self.num_boxes {
+				let mut qnext = self.shader_state.boxes[i].center + h * self.box_vels[i];
+				if qnext.x-self.shader_state.boxes[i].half_widths.x < 0.0 {
+					self.box_vels[i].x = -self.box_prev_vels[i].x;
+					qnext = self.shader_state.boxes[i].center + h * self.box_vels[i];
+				}
+				self.box_prev_vels[i] = self.box_vels[i];
+				self.shader_state.boxes[i].center = qnext;
+				self.box_vels[i].x += hg;
+			}
+			 */
 		}
 		// camera update
 		let t = {
-			let t = -h
-				* self.speed * (glam::Vec3::from(self.key_plus)
-				- glam::Vec3::from(self.key_minus));
-			ppga3d::Translator::new(1.0, t.x, t.y, t.z)
+			let t =
+				0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
+			Translator::new(1.0, t.x, t.y, t.z)
 		};
-		let r = ppga3d::Rotor::new(
+		let r = Rotor::new(
 			1.0,
 			self.mouse_delta.x * 1e-3,
 			self.mouse_delta.z * 1e-1,
 			-self.mouse_delta.y * 1e-3,
 		)
 		.signum();
-		self.mouse_delta = glam::Vec3::ZERO;
-		self.cam = (self.cam.geometric_product(r).geometric_product(t)).signum();
+		self.mouse_delta = VecN::ZERO;
+		self.camera.motion = self
+			.camera
+			.motion
+			.geometric_product(r)
+			.geometric_product(t)
+			.signum();
 	}
-	fn try_make_sphere(&mut self) {
-		if self.num_spheres == MAX_SPHERES {
+	fn try_place_body(&mut self) {
+		if self.num_bodies == MAX_BODIES {
 			return;
 		}
 		let pos = self
-			.cam
-			.transformation(ppga3d::Point::new(1.0, 0.0, 0.0, 0.0));
-		let dir = self
-			.cam
-			.transformation(ppga3d::Point::new(0.0, 0.0, self.sphere_distance, 0.0));
-		let sphere_pos = pos + dir;
-		self.shader_state.spheres[self.num_spheres] = Sphere {
-			color: glam::Vec4::new(rand::random(), rand::random(), rand::random(), 1.0),
-			center: glam::Vec3::new(sphere_pos[1], sphere_pos[2], sphere_pos[3]),
-			radius: self.sphere_radius,
+			.camera
+			.motion
+			.transformation(ORIGIN + AXES[1] * self.place_distance);
+		let rand_color = Vec3::new(rand::random(), rand::random(), rand::random());
+		self.bodies[self.num_bodies] = Body {
+			motion: self.camera.motion.geometric_product(Translator::new(1.0, 0.0, 0.5*self.place_distance, 0.0)),
+			rate: Line::zero(),
+			prev_rate: Line::zero(),
+			shape:self.place_shape.clone(),
+			material: Material {
+				ambient: rand_color,
+				diffuse: rand_color,
+			},
 		};
-		self.num_spheres += 1;
+		// dbg!(&self.bodies);
+		/*
+		self.shader_state.spheres[self.num_spheres] = Sphere {
+			center: VecN::new(sphere_pos[1], sphere_pos[2], sphere_pos[3]),
+			radius: self.sphere_radius,
+			material: Material {
+				ambient: rand_color,
+				diffuse: rand_color,
+			},
+		};
+		 */
+		self.num_bodies += 1;
+		// dbg!(&self.bodies[..self.num_bodies]);
+		// dbg!(&self.camera);
 	}
+	#[cfg(any())]
 	fn shader_state(&mut self) -> &ShaderState {
-		let cam_pos = self
-			.cam
-			.transformation(ppga3d::Point::new(1.0, 0.0, 0.0, 0.0));
-		self.shader_state.cam_pos = glam::Vec3::new(cam_pos[1], cam_pos[2], cam_pos[3]);
-		let cam_up = self.cam.transformation(ppga3d::Point::new(
-			0.0,
-			self.window_size.height as f32,
-			0.0,
-			0.0,
-		));
-		self.shader_state.cam_up = glam::Vec3::new(cam_up[1], cam_up[2], cam_up[3]);
-		let cam_forward = self.cam.transformation(ppga3d::Point::new(
+		let cam_pos = self.camera.transformation(Point::new(1.0, 0.0, 0.0, 0.0));
+		self.shader_state.camera.position = VecN::new(cam_pos[1], cam_pos[2], cam_pos[3]);
+		let cam_up =
+			self.cam
+				.transformation(Point::new(0.0, self.window_size.height as f32, 0.0, 0.0));
+		self.shader_state.camera.up = VecN::new(cam_up[1], cam_up[2], cam_up[3]);
+		let cam_forward = self.camera.transformation(Point::new(
 			0.0,
 			0.0,
 			((self.window_size.width * self.window_size.width
@@ -150,46 +413,94 @@ impl AppState {
 				.sqrt() / (0.5 * self.fov).tan(),
 			0.0,
 		));
-		self.shader_state.cam_forward =
-			glam::Vec3::new(cam_forward[1], cam_forward[2], cam_forward[3]);
-		let cam_left = self.cam.transformation(ppga3d::Point::new(
-			0.0,
-			0.0,
-			0.0,
-			self.window_size.width as f32,
-		));
-		self.shader_state.cam_left = glam::Vec3::new(cam_left[1], cam_left[2], cam_left[3]);
+		self.shader_state.camera.forward =
+			VecN::new(cam_forward[1], cam_forward[2], cam_forward[3]);
+		let cam_left =
+			self.cam
+				.transformation(Point::new(0.0, 0.0, 0.0, self.window_size.width as f32));
+		self.shader_state.camera.left = VecN::new(cam_left[1], cam_left[2], cam_left[3]);
 		&self.shader_state
 	}
 }
 
 async fn run(event_loop: EventLoop<()>, window: Window) {
 	let mut app_state = AppState {
+		// controls
+		key_plus: BVecN::FALSE,
+		key_minus: BVecN::FALSE,
+		mouse_delta: VecN::ZERO,
+		window_size: window.inner_size(),
+		// physics
 		time: std::time::Instant::now(),
 		speed: 1.0,
-		gravity_g: -10.0,
-		cam: ppga3d::Motor::one(),
-		key_plus: glam::BVec3::FALSE,
-		key_minus: glam::BVec3::FALSE,
-		mouse_delta: glam::Vec3::ZERO,
-		window_size: window.inner_size(),
-		fov: std::f32::consts::FRAC_PI_2,
+		gravity_magnitude: 10.0,
+		place_distance: 4.0,
+		place_shape: Shape::Sphere(1.0),
+		// render
+		camera: Camera {
+			motion: Motor::one(),
+			// fov: std::f32::consts::FRAC_PI_2,
+			up: AXES[0],
+			forward: AXES[1],
+			left: AXES[2],
+		},
+		global_light_color: Vec3::ONE * 0.125,
+		point_lights: [PointLight {
+			color: Vec3::ONE,
+			position: ORIGIN + AXES[0],
+		}; MAX_POINT_LIGHTS],
+		floor: (AXES[0] + Point::zero()).dual(),
+		num_bodies: 0,
+		bodies: std::array::from_fn(|_| Body {
+			motion: Motor::one(),
+			rate: Line::zero(),
+			prev_rate: Line::zero(),
+			shape: Shape::Sphere(0.0),
+			material: Material {
+				ambient: Vec3::ONE,
+				diffuse: Vec3::ONE,
+			},
+		}),
+		/*
 		num_spheres: 0,
 		sphere_radius: 1.0,
-		sphere_distance: 4.0,
-		min_frame_time: None,
-		sphere_vels: [glam::Vec3::ZERO; MAX_SPHERES],
+		sphere_vels: [VecN::ZERO; MAX_SPHERES],
+		sphere_prev_vels: [VecN::ZERO; MAX_SPHERES],
+		num_boxes: 0,
+		box_half_width: 1.0,
+		box_vels: [VecN::ZERO; MAX_BOXES],
+		box_prev_vels: [VecN::ZERO; MAX_BOXES],
 		shader_state: ShaderState {
-			cam_pos: glam::Vec3::ZERO,
-			cam_up: glam::Vec3::ZERO,
-			cam_forward: glam::Vec3::ZERO,
-			cam_left: glam::Vec3::ZERO,
-			light_global_color: glam::Vec3::ONE * 0.125,
-			light_source_pos: glam::Vec3::X * 128.0,
-			light_source_color: glam::Vec3::ONE,
+			camera: Camera {
+				position: VecN::ZERO,
+				up: VecN::ZERO,
+				forward: VecN::ZERO,
+				left: VecN::ZERO,
+			},
+			scene_global_color: Vec3::ONE * 0.125,
+			point_lights: [PointLight {
+				color: Vec3::ONE,
+				position: VecN::X * 128.0,
+			}],
 			floor_x: 0.0,
-			spheres: [Sphere::default(); MAX_SPHERES],
+			spheres: [Sphere {
+				center: VecN::ZERO,
+				radius: 0.0,
+				material: Material {
+					ambient: Vec3::ONE,
+					diffuse: Vec3::ONE,
+				},
+			}; MAX_SPHERES],
+			boxes: [Box {
+				center: VecN::ZERO,
+				half_widths: VecN::ZERO,
+				material: Material {
+					ambient: Vec3::ONE,
+					diffuse: Vec3::ONE,
+				},
+			}; MAX_BOXES],
 		},
+		 */
 	};
 	app_state.window_size.width = app_state.window_size.width.max(1);
 	app_state.window_size.height = app_state.window_size.height.max(1);
@@ -225,7 +536,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 	// Load the shaders from disk
 	let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
 		label: None,
-		source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("shader.wgsl"))),
+		source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(SHADER_WGSL)),
 	});
 
 	let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -299,8 +610,6 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 	surface.configure(&device, &config);
 
 	let window = &window;
-	// window .set_cursor_grab(CursorGrabMode::Confined) .expect("set_cursor_grab failed");
-	// event_loop.set_control_flow(ControlFlow::Poll);
 	window.set_cursor_visible(false);
 	event_loop
 		.run(move |event, target| {
@@ -323,7 +632,10 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 					}
 					DeviceEvent::MouseWheel { delta } => {
 						if let LineDelta(_, y) = delta {
-							app_state.fov *= 0.99f32.powi(y as i32);
+							let scale = 0.99f32.powi(y as i32);
+							app_state.camera.up *= scale;
+							app_state.camera.left *= scale;
+							// fov ??
 						} else {
 							dbg!(delta);
 						}
@@ -333,7 +645,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 							match button {
 								0 => {
 									// mouse left
-									app_state.try_make_sphere();
+									app_state.try_place_body();
 								}
 								1 => {
 									// mouse right
@@ -381,21 +693,17 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						config.height = new_size.height.max(1);
 						app_state.window_size.width = config.width;
 						app_state.window_size.height = config.height;
+						let diag = ((config.width*config.width+config.height*config.height )as f32).sqrt().recip();
+						app_state.camera.up = AXES[0] * (config.height as f32 * diag);
+						app_state.camera.left = AXES[2] * (config.width as f32 * diag);
 						surface.configure(&device, &config);
-						// On macos the window needs to be redrawn manually after resizing
+						// On macOS the window needs to be redrawn manually after resizing
 						window.request_redraw();
 					}
 					WindowEvent::RedrawRequested => {
-						if let Some(min_frame_time) = app_state.min_frame_time {
-							let target_time = app_state.time + min_frame_time;
-							let time = std::time::Instant::now();
-							if time < target_time {
-								std::thread::sleep(target_time - time);
-							}
-						}
 						let time = std::time::Instant::now();
 						let dt = time - app_state.time;
-						// dbg!(1.0 / dt.as_secs_f32());
+						// dbg!(dt.as_secs_f32().recip());
 						app_state.time = time;
 						app_state.simulate(dt);
 						let frame = surface
@@ -407,7 +715,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						queue.write_buffer(
 							&uniform_buffer,
 							0,
-							&app_state.shader_state().as_wgsl_bytes().expect(
+							&app_state.as_wgsl_bytes().expect(
 								"Error in encase translating AppState struct to WGSL bytes.",
 							),
 						);
@@ -452,7 +760,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 pub fn main() {
 	let event_loop = EventLoop::new().unwrap();
 	#[allow(unused_mut)]
-	let mut builder = winit::window::WindowBuilder::new();
+	let mut builder = WindowBuilder::new();
 	#[cfg(target_arch = "wasm32")]
 	{
 		use wasm_bindgen::JsCast;

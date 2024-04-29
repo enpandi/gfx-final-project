@@ -12,5 +12,7 @@ env_logger = "0.11"
 pollster = "0.3"
 encase = { version = "0.8.0", features = ["glam"] }
 glam = "0.27"
-geometric_algebra = "0.3"
+#geometric_algebra = "0.3"
+geometric_algebra = { path = "geometric_algebra" }
 rand = "0.8"
+const_format = "0.2"

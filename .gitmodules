@@ -1,0 +1,3 @@
+[submodule "geometric_algebra"]
+	path = geometric_algebra
+	url = git@github.com:enpandi/geometric_algebra.git
