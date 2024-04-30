@@ -1,5 +1,4 @@
-use encase::{impl_vector, ShaderSize, ShaderType};
-use encase::vector::FromVectorParts;
+use encase::{ShaderSize, ShaderType};
 use geometric_algebra::{pga3d::*, *};
 use glam::Vec3;
 use winit::{
@@ -52,17 +51,16 @@ struct Camera {
 	left: Point,
 }
 
-
 #[derive(Debug, ShaderType)]
 struct ShaderPoint {
 	#[align(16)]
 	g0: VecN,
 	// #[align(16)]
-	g1: f32
+	g1: f32,
 }
 impl From<Point> for ShaderPoint {
 	fn from(point: Point) -> Self {
-		Self{
+		Self {
 			g0: {
 				let mut g0 = VecN::ZERO;
 				for i in 0..N {
@@ -74,33 +72,33 @@ impl From<Point> for ShaderPoint {
 		}
 	}
 }
-#[derive(Debug,ShaderType)]
+#[derive(Debug, ShaderType)]
 struct ShaderMotor {
 	#[align(16)]
 	g0: VecN,
 	#[align(16)]
-	g1:VecN,
+	g1: VecN,
 	#[align(16)]
-	g2:glam::Vec2,
+	g2: glam::Vec2,
 }
 impl From<Motor> for ShaderMotor {
 	fn from(motor: Motor) -> Self {
-		Self{
-			g0:{
-				let mut g0=VecN::ZERO;
+		Self {
+			g0: {
+				let mut g0 = VecN::ZERO;
 				for i in 0..N {
-					g0[i]=motor[i];
+					g0[i] = motor[i];
 				}
 				g0
 			},
-			g1:{
-				let mut g1=VecN::ZERO;
+			g1: {
+				let mut g1 = VecN::ZERO;
 				for i in 0..N {
-					g1[i]=motor[i+N];
+					g1[i] = motor[i + N];
 				}
 				g1
 			},
-			g2:glam::Vec2::new(motor[N+N],motor[N+N+1]),
+			g2: glam::Vec2::new(motor[N + N], motor[N + N + 1]),
 		}
 	}
 }
@@ -141,7 +139,7 @@ struct ShaderPointLight {
 impl From<PointLight> for ShaderPointLight {
 	fn from(point_light: PointLight) -> Self {
 		Self {
-			color:point_light.color,
+			color: point_light.color,
 			position: point_light.position.into(),
 		}
 	}
@@ -165,19 +163,18 @@ struct ShaderShape {
 impl From<Shape> for ShaderShape {
 	fn from(shape: Shape) -> Self {
 		Self {
-			params:
-				match shape {
-					Shape::Sphere(radius) => VecN::X * radius,
-					Shape::Box(half_widths) => half_widths,
+			params: match shape {
+				Shape::Sphere(radius) => VecN::X * radius,
+				Shape::Box(half_widths) => half_widths,
 			},
 		}
 	}
 }
 #[derive(Clone, Debug)]
 struct Body {
-	motion: Motor,   // "position"
-	rate: Line,      // "velocity"
-	prev_rate: Line, // for contact resolution
+	motion: Motor,   // "position": M * template "position" * M.reverse == world "position"
+	rate: Line,      // template "velocity"
+	prev_rate: Line, // for velocity-based contact resolution?
 	shape: Shape,
 	material: Material,
 }
@@ -185,9 +182,9 @@ struct Body {
 struct ShaderBody {
 	#[align(16)]
 	motion: ShaderMotor,
-    #[align(16)]
+	#[align(16)]
 	shape: ShaderShape,
-    #[align(16)]
+	#[align(16)]
 	material: Material,
 }
 impl From<Body> for ShaderBody {
@@ -242,7 +239,7 @@ struct AppState {
 	// physics
 	time: std::time::Instant,
 	speed: f32,
-	gravity_magnitude: f32,
+	gravity: Line,
 	place_distance: f32,
 	place_shape: Shape,
 	// render
@@ -268,7 +265,7 @@ impl From<&AppState> for ShaderState {
 	fn from(state: &AppState) -> Self {
 		Self {
 			camera: ShaderCamera::from(state.camera.clone()),
-			global_light_color:state.global_light_color,
+			global_light_color: state.global_light_color,
 			point_lights: state.point_lights.clone().map(ShaderPointLight::from),
 			bodies: state.bodies.clone().map(ShaderBody::from),
 		}
@@ -283,7 +280,10 @@ impl AppState {
 			.expect("encase::UniformBuffer::write error");
 		// dbg!(&self.camera, &self.bodies[..self.num_bodies]);
 		if false {
-			dbg!(buffer.as_ref().chunks(4).map(TryInto::try_into)
+			dbg!(buffer
+				.as_ref()
+				.chunks(4)
+				.map(TryInto::try_into)
 				.map(Result::unwrap)
 				.map(f32::from_le_bytes)
 				.collect::<Vec<_>>());
@@ -298,16 +298,31 @@ impl AppState {
 		q += h * qdot
 		qdot += h * Minv * F(q)
 		 */
+		/*
+		https://enki.ws/ganja.js/examples/pga_dyn.html
+		d/dt motion = -0.5 * motion * rate
+		d/dt rate = -0.5 * (rate.dual * rate - rate * rate.dual).undual (what is undual?)
+		 */
 		let h = dt.as_secs_f32();
 		// physics simulation
-		#[cfg(any())]
+		// #[cfg(any())]
 		{
-			let hg = -AXES[0].regressive_product(ORIGIN + AXES[0]) * (h * self.gravity_magnitude);
 			for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
-				let mut mnext = body.motion + body.rate * h;
+				let forque = body.motion.reversal().transformation(self.gravity).dual();
+				body.motion += body.motion.geometric_product(dbg!(body.rate)) * (-0.5 * h);
+
+				body.rate += (((body.rate.dual().geometric_product(body.rate))
+					- body.rate.geometric_product(body.rate.dual()))
+				.dual()
+				.reversal() * -0.5)
+					.into();
+				/*
+				let mut mnext = body.motion - body.motion * body.rate * (0.5 * h);
 				match body.shape {
+					// collisions
 					Shape::Sphere(r) => {
 						// ?? do some projection shit
+						let y = body.motion.transformation(ORIGIN).regressive_product(self.floor);
 					}
 					Shape::Box(half_widths) => {
 						// more projection shit
@@ -316,8 +331,10 @@ impl AppState {
 				body.prev_rate = body.rate;
 				body.motion = mnext;
 				// https://enki.ws/ganja.js/examples/pga_dyn.html#Collision_Response
-				body.rate += body.motion.reversal().transformation(hg).dual();
+				body.rate += (body.rate.dual()*body.rate - body.rate*body.rate.dual()).dual().inverse() * -0.5;
+				// body.rate += dbg!(body.motion.reversal().transformation(self.gravity).dual() * h);
 				// wtf
+				 */
 			}
 			/*
 			for i in 0..self.num_spheres {
@@ -344,8 +361,7 @@ impl AppState {
 		}
 		// camera update
 		let t = {
-			let t =
-				0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
+			let t = 0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
 			Translator::new(1.0, t.x, t.y, t.z)
 		};
 		let r = Rotor::new(
@@ -367,16 +383,26 @@ impl AppState {
 		if self.num_bodies == MAX_BODIES {
 			return;
 		}
-		let pos = self
-			.camera
-			.motion
-			.transformation(ORIGIN + AXES[1] * self.place_distance);
 		let rand_color = Vec3::new(rand::random(), rand::random(), rand::random());
+		let motion = self.camera.motion.geometric_product(Translator::new(
+			1.0,
+			0.0,
+			0.5 * self.place_distance,
+			0.0,
+		));
+		let rand_around_1 = || (rand::random::<f32>() - 0.5) + 1.0;
 		self.bodies[self.num_bodies] = Body {
-			motion: self.camera.motion.geometric_product(Translator::new(1.0, 0.0, 0.5*self.place_distance, 0.0)),
-			rate: Line::zero(),
+			motion,
+			rate: dbg!(motion
+				.reversal()
+				.transformation(dbg!(ORIGIN.regressive_product(-AXES[0]).dual()))),
 			prev_rate: Line::zero(),
-			shape:self.place_shape.clone(),
+			// shape: self.place_shape.clone(),
+			shape: if rand::random::<f32>() < 0.5 {
+				Shape::Sphere(rand_around_1())
+			} else {
+				Shape::Box(VecN::from_array(std::array::from_fn(|_| rand_around_1())))
+			},
 			material: Material {
 				ambient: rand_color,
 				diffuse: rand_color,
@@ -433,7 +459,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		// physics
 		time: std::time::Instant::now(),
 		speed: 1.0,
-		gravity_magnitude: 10.0,
+		gravity: dbg!(-AXES[0].regressive_product(ORIGIN).dual() * 10.0),
 		place_distance: 4.0,
 		place_shape: Shape::Sphere(1.0),
 		// render
@@ -447,12 +473,12 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		global_light_color: Vec3::ONE * 0.125,
 		point_lights: [PointLight {
 			color: Vec3::ONE,
-			position: ORIGIN + AXES[0],
+			position: ORIGIN + AXES[0] * 128.0,
 		}; MAX_POINT_LIGHTS],
 		floor: (AXES[0] + Point::zero()).dual(),
 		num_bodies: 0,
 		bodies: std::array::from_fn(|_| Body {
-			motion: Motor::one(),
+			motion: Motor::zero(),
 			rate: Line::zero(),
 			prev_rate: Line::zero(),
 			shape: Shape::Sphere(0.0),
@@ -635,7 +661,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 							let scale = 0.99f32.powi(y as i32);
 							app_state.camera.up *= scale;
 							app_state.camera.left *= scale;
-							// fov ??
+						// fov ??
 						} else {
 							dbg!(delta);
 						}
@@ -693,7 +719,10 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						config.height = new_size.height.max(1);
 						app_state.window_size.width = config.width;
 						app_state.window_size.height = config.height;
-						let diag = ((config.width*config.width+config.height*config.height )as f32).sqrt().recip();
+						let diag = ((config.width * config.width + config.height * config.height)
+							as f32)
+							.sqrt()
+							.recip();
 						app_state.camera.up = AXES[0] * (config.height as f32 * diag);
 						app_state.camera.left = AXES[2] * (config.width as f32 * diag);
 						surface.configure(&device, &config);

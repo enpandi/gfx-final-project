@@ -86,27 +86,41 @@ fn march(pos: Point, dir: Point) -> MarchResult {
         for (var idx = 0; idx < MAX_BODIES; idx++) {
             if state.bodies[idx].shape.params[0] == 0.0 { break; }
             var sdf = best_sdf;
+            let local_cur_pos = motor_point_transformation(
+                motor_reversal(state.bodies[idx].motion),
+                cur_pos);
             // https://iquilezles.org/articles/distfunctions/
             if state.bodies[idx].shape.params[1] == 0.0 {
                 // sphere
                 let radius = state.bodies[idx].shape.params[0];
 //                if true{return MarchResult(radius,-2);}
-                let center = motor_point_transformation(
-                    state.bodies[idx].motion,
-                    ORIGIN,
-                );
-                let diff = point_point_sub(cur_pos, center);
-                sdf = ideal_point_magnitude(diff) - radius;
+//                let center = motor_point_transformation(
+//                    state.bodies[idx].motion,
+//                    ORIGIN,
+//                );
+//                let diff = point_point_sub(cur_pos, center);
+//                sdf = ideal_point_magnitude(diff) - radius;
+//                sdf = line_magnitude(point_point_regressive_product(ORIGIN, local)) - radius;
+                if OPTIMIZE_IDEAL_POINTS {
+                    sdf = length(local_cur_pos.g0) - radius;
+                } else {
+                    sdf = ideal_point_magnitude(point_point_sub(local_cur_pos, ORIGIN)) - radius;
+                }
+//                return MarchResult(abs(point_magnitude(local)-ideal_point_magnitude(diff)), -2);
             } else {
                 // box
                 /*
                 let q = abs(cur_pos) - state.boxes[idx].half_widths;
                 let sdf = length(max(q, vecN())) + min(0.0, maxN(q));
                 */
-                var half_widths = Point();
-                for (var d = 0; d < N; d++) {
-                    half_widths.g0[d] = state.bodies[idx].shape.params[d];
+                var half_widths = state.bodies[idx].shape.params;
+                let q = abs(local_cur_pos.g0) - half_widths;
+                var inner_sdf = 0.0;
+                for (var i = 0; i < N; i++) {
+                    inner_sdf = max(inner_sdf, q[i]);
                 }
+                inner_sdf = min(inner_sdf, 0.0);
+                sdf = length(max(q, vecN())) + inner_sdf;
             }
             if sdf < best_sdf {
                 best_sdf = sdf;
@@ -192,14 +206,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 //        if primary.idx==-3{return vec4f(0,primary.t,0,1);}
 //        if primary.idx==-4{return vec4f(0,0,primary.t,1);}
 //        if true {
-            // ignore shadow rays for now
+//            // ignore shadow rays for now
 //            return vec4(state.bodies[primary.idx].material.diffuse, 1.0);
 //        }
         var color = state.global_light_color * state.bodies[primary.idx].material.ambient;
         let isect = point_point_add(pos, point_scalar_mul(dir, primary.t));
         for (var pl_idx = 0; pl_idx < MAX_POINT_LIGHTS; pl_idx++) {
-            let dir = point_point_sub(isect, state.point_lights[pl_idx].position);
+            let dir = ideal_point_signum(point_point_sub(isect, state.point_lights[pl_idx].position));
             let shadow = march(state.point_lights[pl_idx].position, dir);
+//            if dir.g1==0.0{return vec4f(1,0,0,1);}
+//            if state.point_lights[pl_idx].position.g1==1.0{return vec4f(1,0,0,1);}
             if shadow.idx != primary.idx { continue; }
             let shadow_isect = point_point_add(
                 state.point_lights[pl_idx].position,
