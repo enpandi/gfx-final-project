@@ -2,7 +2,7 @@ const MARCH_MAX_ITERS = 128;
 const MARCH_EPSILON = 1e-4;
 const MARCH_INF = 1e5;
 
-const SMOOTH_MARCH = true;
+const SMOOTH_MARCH = false;
 const SMOOTH_K = 0.5;
 const SMOOTH_K_INV = 1.0 / SMOOTH_K;
 // direction vectors ("ideal points") square to 0
@@ -134,7 +134,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         let bruh = state.point_lights[pl_idx].position;
         let dir = normalize_point(point_point_sub(isect, state.point_lights[pl_idx].position));
         let shadow = march(state.point_lights[pl_idx].position, dir);
-        if shadow.idx != primary.idx { continue; } // TODO uncomment this line
+        if shadow.idx != primary.idx { continue; }
         let shadow_isect = point_point_add(
             state.point_lights[pl_idx].position,
             point_scalar_mul(dir, shadow.t)

@@ -294,10 +294,7 @@ impl AppState {
 			.signum();
 		// physics simulation
 		for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
-			dbg!(&body.motion);
-			if true {
-				break;
-			}
+			//dbg!(&body.motion);
 			// see https://enki.ws/ganja.js/examples/pga_dyn.html
 			// we use verlet integration instead
 			let d_motion = body.motion.geometric_product(body.rate) * -0.5;
@@ -320,10 +317,9 @@ impl AppState {
 			// see eq. 132 here https://geometricalgebra.org/downloads/PGA4CS.pdf
 			// grade(forque)=grade(join line)=d-1 i think?, and (d-1)d is always even
 			// so we probably (?) don't need a negative sign
-			dbg!(d_rate);
 			let bruh = d_rate * h;
-			assert!(bruh[6].abs() < 1e-6);
-			assert!(bruh[7].abs() < 1e-6);
+			//assert!(bruh[6].abs() < 1e-6);
+			//assert!(bruh[7].abs() < 1e-6);
 			body.prev_rate = body.rate;
 			body.rate += (d_rate * h).into();
 			/*
@@ -369,6 +365,16 @@ impl AppState {
 		}
 		 */
 		// TODO delete bodies that are too far from the camera
+        let mut new_len = 0;
+        for i in 0..self.num_bodies {
+            let position = VecN::from_array(std::array::from_fn(|e| { -2.0 * self.bodies[i].motion[e] }));
+            if position.length_squared() < 128.0*128.0 {
+                self.bodies[new_len] = self.bodies[i].clone();
+                new_len += 1;
+            }
+        }
+        self.num_bodies = new_len;
+        self.bodies[new_len].shape = Shape::None;
 	}
 	fn try_place_body(&mut self) {
 		if self.num_bodies == MAX_BODIES {
@@ -553,7 +559,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 
 	let window = &window;
 	window.set_cursor_visible(false);
-    window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+    //window.set_fullscreen(Some(Fullscreen::Borderless(None)));
 	event_loop
 		.run(move |event, target| {
 			// Have the closure take ownership of the resources.
