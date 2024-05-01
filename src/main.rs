@@ -271,7 +271,7 @@ impl AppState {
 		// physics simulation
 		{
 			for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
-                                dbg!(&body.motion);
+                                //dbg!(&body.motion);
                                 if true{break;}
 				let forque = body.motion.reversal().transformation(self.gravity_accel).dual();
 				body.motion += body.motion.geometric_product(body.rate) * (-0.5 * h);
@@ -631,8 +631,14 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 				Event::WindowEvent { event, .. } => match event {
 					WindowEvent::Resized(new_size) => {
 						// Reconfigure the surface with the new size
-						config.width = new_size.width.max(1);
-						config.height = new_size.height.max(1);
+                                                config.width = new_size.width;
+                                                config.height = new_size.height;
+                                                while config.width * config.height > 1048576 {
+                                                    config.width >>= 1;
+                                                    config.height >>= 1;
+                                                }
+						config.width = config.width.max(1);
+						config.height = config.height.max(1);
 						app_state.window_size.width = config.width;
 						app_state.window_size.height = config.height;
 						let diag = ((config.width * config.width + config.height * config.height)

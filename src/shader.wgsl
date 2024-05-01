@@ -1,4 +1,4 @@
-const MARCH_MAX_ITERS = 32;
+const MARCH_MAX_ITERS = 128;
 const MARCH_EPSILON = 1e-4;
 const MARCH_INF = 1e4;
 // direction vectors ("ideal points") square to 0
@@ -73,7 +73,7 @@ struct MarchResult {
     idx: i32,
 }
 fn march(pos: Point, dir: Point) -> MarchResult {
-    var t = 0.0;
+    var t = MARCH_EPSILON;
     for (var iter = 0; iter < MARCH_MAX_ITERS; iter++) {
 //        if iter>0{return MarchResult(1,-3);}
         var best_idx = -1;
@@ -111,12 +111,13 @@ fn march(pos: Point, dir: Point) -> MarchResult {
                 let sdf = length(max(q, vecN())) + min(0.0, maxN(q));
                 */
                 var half_widths = state.bodies[idx].shape.params;
-                let q = abs(local_cur_pos.g0) - half_widths;
+		let roundness = 0.2;
+                let q = abs(local_cur_pos.g0) - half_widths + roundness;
                 var max_q = q[0];
                 for (var i = 1; i < N; i++) {
                     max_q = max(max_q, q[i]);
                 }
-                sdf = length(max(q, vecN())) + min(max_q, 0.0);
+                sdf = length(max(q, vecN())) + min(max_q, 0.0) - roundness;
             }
             if sdf < best_sdf {
                 best_sdf = sdf;
