@@ -1,19 +1,20 @@
+const MARCH_MAX_ITERS = 32;
+const MARCH_EPSILON = 1e-4;
+const MARCH_INF = 1e4;
 // direction vectors ("ideal points") square to 0
 // so they have 0 norm and cannot be normalized via point_signum
 // see section 7.1.1 "the ideal norm": https://arxiv.org/abs/2002.04509
-const OPTIMIZE_IDEAL_POINTS = true;
-fn ideal_point_squared_magnitude(dir: Point) -> f32 {
-    if OPTIMIZE_IDEAL_POINTS { return dot(dir.g0, dir.g0); }
-    return line_squared_magnitude(point_point_regressive_product(dir, ORIGIN));
+// const OPTIMIZE_IDEAL_POINTS = true;
+fn squared_length_point(dir: Point) -> f32 {
+    return dot(dir.g0, dir.g0);
 }
-fn ideal_point_magnitude(dir: Point) -> f32 {
-    if OPTIMIZE_IDEAL_POINTS { return length(dir.g0); }
-    return sqrt(ideal_point_squared_magnitude(dir));
+fn length_point(dir: Point) -> f32 {
+    return length(dir.g0);
 }
-fn ideal_point_signum(dir: Point) -> Point {
-    if OPTIMIZE_IDEAL_POINTS { return Point(normalize(dir.g0), 0.0); }
-    return point_scalar_geometric_product(dir, 1.0 / ideal_point_magnitude(dir));
+fn normalize_point(dir: Point) -> Point {
+    return Point(normalize(dir.g0), dir.g1);
 }
+// just gonna use .g0 .g1 etc because WGSL type aliasing is hard (no methods)
 
 struct Camera {
     motion: Motor,
@@ -67,9 +68,6 @@ fn vs_main(
     return VertexOutput(vec4(x, y, 0, 1), y, -x);
 }
 
-const MARCH_MAX_ITERS = 32;
-const MARCH_EPSILON = 1e-4;
-const MARCH_INF = 1e4;
 struct MarchResult {
     t: f32,
     idx: i32,
@@ -99,14 +97,13 @@ fn march(pos: Point, dir: Point) -> MarchResult {
 //                    ORIGIN,
 //                );
 //                let diff = point_point_sub(cur_pos, center);
-//                sdf = ideal_point_magnitude(diff) - radius;
-//                sdf = line_magnitude(point_point_regressive_product(ORIGIN, local)) - radius;
-                if OPTIMIZE_IDEAL_POINTS {
-                    sdf = length(local_cur_pos.g0) - radius;
-                } else {
-                    sdf = ideal_point_magnitude(point_point_sub(local_cur_pos, ORIGIN)) - radius;
-                }
-//                return MarchResult(abs(point_magnitude(local)-ideal_point_magnitude(diff)), -2);
+//                sdf = length_point(diff) - radius;
+//                sdf = joinline_magnitude(point_point_regressive_product(ORIGIN, local)) - radius;
+                //if OPTIMIZE_IDEAL_POINTS {
+                //} else {
+                    sdf = length_point(point_point_sub(local_cur_pos, ORIGIN)) - radius;
+                //}
+//                return MarchResult(abs(point_magnitude(local)-length_point(diff)), -2);
             } else {
                 // box
                 /*
@@ -115,12 +112,11 @@ fn march(pos: Point, dir: Point) -> MarchResult {
                 */
                 var half_widths = state.bodies[idx].shape.params;
                 let q = abs(local_cur_pos.g0) - half_widths;
-                var inner_sdf = 0.0;
-                for (var i = 0; i < N; i++) {
-                    inner_sdf = max(inner_sdf, q[i]);
+                var max_q = q[0];
+                for (var i = 1; i < N; i++) {
+                    max_q = max(max_q, q[i]);
                 }
-                inner_sdf = min(inner_sdf, 0.0);
-                sdf = length(max(q, vecN())) + inner_sdf;
+                sdf = length(max(q, vecN())) + min(max_q, 0.0);
             }
             if sdf < best_sdf {
                 best_sdf = sdf;
@@ -174,7 +170,7 @@ fn march_boxes(pos: vecN, dir: vecN) -> MarchResult {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let pos = motor_point_transformation(state.camera.motion, ORIGIN);
-    let dir = ideal_point_signum(
+    let dir = normalize_point(
         motor_point_transformation(
             state.camera.motion,
             point_point_add(
@@ -196,8 +192,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 //            ),
 //        ),
 //    );
-//    if true{return vec4(dir.g1,0,0,1.0);}
-//    if true{return vec4(dir.g0,1.0);}
+    //if true{return vec4(pos.g1,0,0,1.0);}
+    //if true{return vec4(dir.g0,1.0);}
     let primary = march(pos, dir);
     if primary.idx == -1 {
         return vec4f(0, 0, 0, 1);
@@ -210,9 +206,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 //            return vec4(state.bodies[primary.idx].material.diffuse, 1.0);
 //        }
         var color = state.global_light_color * state.bodies[primary.idx].material.ambient;
+	//if true{return vec4f(1,0,0,1);}
         let isect = point_point_add(pos, point_scalar_mul(dir, primary.t));
         for (var pl_idx = 0; pl_idx < MAX_POINT_LIGHTS; pl_idx++) {
-            let dir = ideal_point_signum(point_point_sub(isect, state.point_lights[pl_idx].position));
+            let dir = normalize_point(point_point_sub(isect, state.point_lights[pl_idx].position));
             let shadow = march(state.point_lights[pl_idx].position, dir);
 //            if dir.g1==0.0{return vec4f(1,0,0,1);}
 //            if state.point_lights[pl_idx].position.g1==1.0{return vec4f(1,0,0,1);}
@@ -222,7 +219,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
                 point_scalar_mul(dir, shadow.t)
             );
             let delta = point_point_sub(shadow_isect, isect);
-            if ideal_point_squared_magnitude(delta) > MARCH_EPSILON { continue; }
+            if squared_length_point(delta) > MARCH_EPSILON { continue; }
 //            let normal = normalize(isect - state.bodies[primary.idx].center);
 //            color += state.point_lights[pl_idx].color * state.bodies[primary.idx].material.diffuse * max(0.0, -dot(dir, normal));
             color += state.point_lights[pl_idx].color * state.bodies[primary.idx].material.diffuse;

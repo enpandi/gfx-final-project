@@ -16,15 +16,20 @@ const N: usize = 3;
 type VecN = glam::Vec3;
 type BVecN = glam::BVec3;
 const WGSL_GEOMETRIC_ALGEBRA: &str = include_str!("../geometric_algebra/src/pga3d.wgsl");
-const AXES: [Point; N] = [
-	Point::new(1.0, 0.0, 0.0, 0.0),
-	Point::new(0.0, 1.0, 0.0, 0.0),
-	Point::new(0.0, 0.0, 1.0, 0.0),
+const BASIS: [Hyperplane; N + 1] = [
+        Hyperplane::new(0.0, 0.0, 0.0, 1.0), // e0 (i put the dual element at the end)
+	Hyperplane::new(1.0, 0.0, 0.0, 0.0), // e1
+	Hyperplane::new(0.0, 1.0, 0.0, 0.0), // e2
+	Hyperplane::new(0.0, 0.0, 1.0, 0.0), // e3
 ];
-const ORIGIN: Point = Point::new(0.0, 0.0, 0.0, 1.0);
+const ORIGIN: Point = Point::new(0.0, 0.0, 0.0, 1.0); // BASIS[0].dual() is non const..
+// comment these out when N > 3
+type MeetLine = MeetJoinLine; // rates (velocity), accelerations
+type JoinLine = MeetJoinLine; // forques, momenta
+
+
 
 // don't change dimensions after this
-//static GRAVITY_SIGNUM: Line = -AXES[0].regressive_product(ORIGIN + AXES[0]);
 const MAX_POINT_LIGHTS: usize = 1;
 const MAX_BODIES: usize = 16;
 
@@ -120,7 +125,6 @@ impl From<Camera> for ShaderCamera {
 			up: camera.up.into(),
 			forward: camera.forward.into(),
 			left: camera.left.into(),
-			// fov: camera.fov,
 		}
 	}
 }
@@ -152,6 +156,7 @@ struct Material {
 }
 #[derive(Clone, Debug)]
 enum Shape {
+        None,
 	Sphere(f32),
 	Box(VecN),
 }
@@ -164,6 +169,7 @@ impl From<Shape> for ShaderShape {
 	fn from(shape: Shape) -> Self {
 		Self {
 			params: match shape {
+                                Shape::None => VecN::ZERO,
 				Shape::Sphere(radius) => VecN::X * radius,
 				Shape::Box(half_widths) => half_widths,
 			},
@@ -173,8 +179,8 @@ impl From<Shape> for ShaderShape {
 #[derive(Clone, Debug)]
 struct Body {
 	motion: Motor,   // "position": M * template "position" * M.reverse == world "position"
-	rate: Line,      // template "velocity"
-	prev_rate: Line, // for velocity-based contact resolution?
+	rate: MeetLine,      // template "velocity"
+	prev_rate: MeetLine, // for velocity-based contact resolution?
 	shape: Shape,
 	material: Material,
 }
@@ -196,38 +202,6 @@ impl From<Body> for ShaderBody {
 		}
 	}
 }
-/*
-#[derive(Copy, Clone, Debug, ShaderType)]
-struct Sphere {
-	center: VecN,
-	radius: f32,
-	material: Material,
-}
-#[derive(Copy, Clone, Debug, ShaderType)]
-struct Box {
-	center: VecN,
-	half_widths: VecN,
-	material: Material,
-}
-#[derive(Debug)]
-struct ShaderState {
-	camera: Camera,
-	scene_global_color: Vec3,
-	point_lights: [PointLight; MAX_POINT_LIGHTS],
-	floor_x: f32,
-	bodies: [Body; MAX_BODIES],
-}
-
-impl ShaderState {
-	fn as_wgsl_bytes(&self) -> encase::internal::Result<Vec<u8>> {
-		let mut buffer = encase::UniformBuffer::new(Vec::new());
-		buffer
-			.write(self)
-			.expect("encase::UniformBuffer::write error");
-		Ok(buffer.into_inner())
-	}
-}
-*/
 
 #[derive(Debug)]
 struct AppState {
@@ -239,7 +213,7 @@ struct AppState {
 	// physics
 	time: std::time::Instant,
 	speed: f32,
-	gravity: Line,
+	gravity_accel: MeetLine,
 	place_distance: f32,
 	place_shape: Shape,
 	// render
@@ -248,7 +222,7 @@ struct AppState {
 	point_lights: [PointLight; MAX_POINT_LIGHTS],
 	num_bodies: usize,
 	bodies: [Body; MAX_BODIES],
-	floor: Plane,
+	floor: Hyperplane,
 }
 #[derive(Debug, ShaderType)]
 struct ShaderState {
@@ -278,16 +252,6 @@ impl AppState {
 		buffer
 			.write(&ShaderState::from(self))
 			.expect("encase::UniformBuffer::write error");
-		// dbg!(&self.camera, &self.bodies[..self.num_bodies]);
-		if false {
-			dbg!(buffer
-				.as_ref()
-				.chunks(4)
-				.map(TryInto::try_into)
-				.map(Result::unwrap)
-				.map(f32::from_le_bytes)
-				.collect::<Vec<_>>());
-		}
 		Ok(buffer.into_inner())
 	}
 	fn simulate(&mut self, dt: std::time::Duration) {
@@ -305,12 +269,12 @@ impl AppState {
 		 */
 		let h = dt.as_secs_f32();
 		// physics simulation
-		// #[cfg(any())]
 		{
 			for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
-				let forque = body.motion.reversal().transformation(self.gravity).dual();
-				body.motion += body.motion.geometric_product(dbg!(body.rate)) * (-0.5 * h);
-
+                                dbg!(&body.motion);
+                                if true{break;}
+				let forque = body.motion.reversal().transformation(self.gravity_accel).dual();
+				body.motion += body.motion.geometric_product(body.rate) * (-0.5 * h);
 				body.rate += (((body.rate.dual().geometric_product(body.rate))
 					- body.rate.geometric_product(body.rate.dual()))
 				.dual()
@@ -361,7 +325,7 @@ impl AppState {
 		}
 		// camera update
 		let t = {
-			let t = 0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
+			let t = -0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
 			Translator::new(1.0, t.x, t.y, t.z)
 		};
 		let r = Rotor::new(
@@ -385,19 +349,21 @@ impl AppState {
 		}
 		let rand_color = Vec3::new(rand::random(), rand::random(), rand::random());
 		let motion = self.camera.motion.geometric_product(Translator::new(
-			1.0,
+                        1.0,
 			0.0,
-			0.5 * self.place_distance,
+			-0.5 * self.place_distance,
 			0.0,
 		));
 		let rand_around_1 = || (rand::random::<f32>() - 0.5) + 1.0;
 		self.bodies[self.num_bodies] = Body {
 			motion,
-			rate: dbg!(motion
+			rate: motion
 				.reversal()
-				.transformation(dbg!(ORIGIN.regressive_product(-AXES[0]).dual()))),
-			prev_rate: Line::zero(),
-			// shape: self.place_shape.clone(),
+                                // TODO why dual? re-read eq. 2.25 from https://bivector.net/PGAdyn.pdf
+				.transformation(
+                                    dbg!(BASIS[0].outer_product(BASIS[1]))
+                                ),
+			prev_rate: MeetLine::zero(),
 			shape: if rand::random::<f32>() < 0.5 {
 				Shape::Sphere(rand_around_1())
 			} else {
@@ -408,20 +374,9 @@ impl AppState {
 				diffuse: rand_color,
 			},
 		};
-		// dbg!(&self.bodies);
-		/*
-		self.shader_state.spheres[self.num_spheres] = Sphere {
-			center: VecN::new(sphere_pos[1], sphere_pos[2], sphere_pos[3]),
-			radius: self.sphere_radius,
-			material: Material {
-				ambient: rand_color,
-				diffuse: rand_color,
-			},
-		};
-		 */
+                self.bodies[self.num_bodies].rate = MeetLine::zero(); // TODO DELETE THIS
+                dbg!(&self.bodies[self.num_bodies]);
 		self.num_bodies += 1;
-		// dbg!(&self.bodies[..self.num_bodies]);
-		// dbg!(&self.camera);
 	}
 	#[cfg(any())]
 	fn shader_state(&mut self) -> &ShaderState {
@@ -459,74 +414,35 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		// physics
 		time: std::time::Instant::now(),
 		speed: 1.0,
-		gravity: dbg!(-AXES[0].regressive_product(ORIGIN).dual() * 10.0),
+		gravity_accel: dbg!(BASIS[0].outer_product(BASIS[1])) * 10.0,
 		place_distance: 4.0,
 		place_shape: Shape::Sphere(1.0),
 		// render
-		camera: Camera {
+		camera: dbg!(Camera {
 			motion: Motor::one(),
-			// fov: std::f32::consts::FRAC_PI_2,
-			up: AXES[0],
-			forward: AXES[1],
-			left: AXES[2],
-		},
+			up: BASIS[1].dual(),
+			forward: BASIS[2].dual(), // TODO should this be a plane?
+			left: BASIS[3].dual(),
+                        // we don't need an additional camera param in 4D
+                        // because the camera window is always 2d
+		}),
 		global_light_color: Vec3::ONE * 0.125,
 		point_lights: [PointLight {
 			color: Vec3::ONE,
-			position: ORIGIN + AXES[0] * 128.0,
+			position: ORIGIN + BASIS[1].dual() * 128.0,
 		}; MAX_POINT_LIGHTS],
-		floor: (AXES[0] + Point::zero()).dual(),
+		floor: BASIS[1],
 		num_bodies: 0,
 		bodies: std::array::from_fn(|_| Body {
 			motion: Motor::zero(),
-			rate: Line::zero(),
-			prev_rate: Line::zero(),
-			shape: Shape::Sphere(0.0),
+			rate: MeetLine::zero(),
+			prev_rate: MeetLine::zero(),
+			shape: Shape::None,
 			material: Material {
 				ambient: Vec3::ONE,
 				diffuse: Vec3::ONE,
 			},
 		}),
-		/*
-		num_spheres: 0,
-		sphere_radius: 1.0,
-		sphere_vels: [VecN::ZERO; MAX_SPHERES],
-		sphere_prev_vels: [VecN::ZERO; MAX_SPHERES],
-		num_boxes: 0,
-		box_half_width: 1.0,
-		box_vels: [VecN::ZERO; MAX_BOXES],
-		box_prev_vels: [VecN::ZERO; MAX_BOXES],
-		shader_state: ShaderState {
-			camera: Camera {
-				position: VecN::ZERO,
-				up: VecN::ZERO,
-				forward: VecN::ZERO,
-				left: VecN::ZERO,
-			},
-			scene_global_color: Vec3::ONE * 0.125,
-			point_lights: [PointLight {
-				color: Vec3::ONE,
-				position: VecN::X * 128.0,
-			}],
-			floor_x: 0.0,
-			spheres: [Sphere {
-				center: VecN::ZERO,
-				radius: 0.0,
-				material: Material {
-					ambient: Vec3::ONE,
-					diffuse: Vec3::ONE,
-				},
-			}; MAX_SPHERES],
-			boxes: [Box {
-				center: VecN::ZERO,
-				half_widths: VecN::ZERO,
-				material: Material {
-					ambient: Vec3::ONE,
-					diffuse: Vec3::ONE,
-				},
-			}; MAX_BOXES],
-		},
-		 */
 	};
 	app_state.window_size.width = app_state.window_size.width.max(1);
 	app_state.window_size.height = app_state.window_size.height.max(1);
@@ -723,8 +639,8 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 							as f32)
 							.sqrt()
 							.recip();
-						app_state.camera.up = AXES[0] * (config.height as f32 * diag);
-						app_state.camera.left = AXES[2] * (config.width as f32 * diag);
+						app_state.camera.up = BASIS[1].dual() * (config.height as f32 * diag);
+						app_state.camera.left = BASIS[3].dual() * (config.width as f32 * diag);
 						surface.configure(&device, &config);
 						// On macOS the window needs to be redrawn manually after resizing
 						window.request_redraw();
