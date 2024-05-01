@@ -16,18 +16,20 @@ const N: usize = 3;
 type VecN = glam::Vec3;
 type BVecN = glam::BVec3;
 const WGSL_GEOMETRIC_ALGEBRA: &str = include_str!("../geometric_algebra/src/pga3d.wgsl");
-const BASIS: [Hyperplane; N + 1] = [
-        Hyperplane::new(0.0, 0.0, 0.0, 1.0), // e0 (i put the dual element at the end)
-	Hyperplane::new(1.0, 0.0, 0.0, 0.0), // e1
-	Hyperplane::new(0.0, 1.0, 0.0, 0.0), // e2
-	Hyperplane::new(0.0, 0.0, 1.0, 0.0), // e3
+const BASIS: [Plane; N + 1] = [
+	Plane::new(0.0, 0.0, 0.0, 1.0), // e0 (i put the dual element at the end)
+	Plane::new(1.0, 0.0, 0.0, 0.0), // e1
+	Plane::new(0.0, 1.0, 0.0, 0.0), // e2
+	Plane::new(0.0, 0.0, 1.0, 0.0), // e3
 ];
-const ORIGIN: Point = Point::new(0.0, 0.0, 0.0, 1.0); // BASIS[0].dual() is non const..
+const ORIGIN: Point = Point::new(0.0, 0.0, 0.0, 1.0);
+// BASIS[0].dual() is non const
+// also this library uses different dual conventions from most of the literature i'm referencing..
+
+//const I: Pseudoscalar = Pseudoscalar::new(1.0);
 // comment these out when N > 3
 type MeetLine = MeetJoinLine; // rates (velocity), accelerations
 type JoinLine = MeetJoinLine; // forques, momenta
-
-
 
 // don't change dimensions after this
 const MAX_POINT_LIGHTS: usize = 1;
@@ -156,7 +158,7 @@ struct Material {
 }
 #[derive(Clone, Debug)]
 enum Shape {
-        None,
+	None,
 	Sphere(f32),
 	Box(VecN),
 }
@@ -169,7 +171,7 @@ impl From<Shape> for ShaderShape {
 	fn from(shape: Shape) -> Self {
 		Self {
 			params: match shape {
-                                Shape::None => VecN::ZERO,
+				Shape::None => VecN::ZERO,
 				Shape::Sphere(radius) => VecN::X * radius,
 				Shape::Box(half_widths) => half_widths,
 			},
@@ -178,8 +180,8 @@ impl From<Shape> for ShaderShape {
 }
 #[derive(Clone, Debug)]
 struct Body {
-	motion: Motor,   // "position": M * template "position" * M.reverse == world "position"
-	rate: MeetLine,      // template "velocity"
+	motion: Motor,  // "position": M * template "position" * M.reverse == world "position"
+	rate: MeetLine, // template "velocity"
 	prev_rate: MeetLine, // for velocity-based contact resolution?
 	shape: Shape,
 	material: Material,
@@ -222,7 +224,7 @@ struct AppState {
 	point_lights: [PointLight; MAX_POINT_LIGHTS],
 	num_bodies: usize,
 	bodies: [Body; MAX_BODIES],
-	floor: Hyperplane,
+	floor: Plane,
 }
 #[derive(Debug, ShaderType)]
 struct ShaderState {
@@ -268,64 +270,10 @@ impl AppState {
 		d/dt rate = -0.5 * (rate.dual * rate - rate * rate.dual).undual (what is undual?)
 		 */
 		let h = dt.as_secs_f32();
-		// physics simulation
-		{
-			for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
-                                //dbg!(&body.motion);
-                                if true{break;}
-				let forque = body.motion.reversal().transformation(self.gravity_accel).dual();
-				body.motion += body.motion.geometric_product(body.rate) * (-0.5 * h);
-				body.rate += (((body.rate.dual().geometric_product(body.rate))
-					- body.rate.geometric_product(body.rate.dual()))
-				.dual()
-				.reversal() * -0.5)
-					.into();
-				/*
-				let mut mnext = body.motion - body.motion * body.rate * (0.5 * h);
-				match body.shape {
-					// collisions
-					Shape::Sphere(r) => {
-						// ?? do some projection shit
-						let y = body.motion.transformation(ORIGIN).regressive_product(self.floor);
-					}
-					Shape::Box(half_widths) => {
-						// more projection shit
-					}
-				}
-				body.prev_rate = body.rate;
-				body.motion = mnext;
-				// https://enki.ws/ganja.js/examples/pga_dyn.html#Collision_Response
-				body.rate += (body.rate.dual()*body.rate - body.rate*body.rate.dual()).dual().inverse() * -0.5;
-				// body.rate += dbg!(body.motion.reversal().transformation(self.gravity).dual() * h);
-				// wtf
-				 */
-			}
-			/*
-			for i in 0..self.num_spheres {
-				let mut qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
-				if qnext.x < 0.0 {
-					self.sphere_vels[i].x = -self.sphere_prev_vels[i].x;
-					qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
-				}
-				self.sphere_prev_vels[i] = self.sphere_vels[i];
-				self.shader_state.spheres[i].center = qnext;
-				self.sphere_vels[i].x += hg;
-			}
-			for i in 0..self.num_boxes {
-				let mut qnext = self.shader_state.boxes[i].center + h * self.box_vels[i];
-				if qnext.x-self.shader_state.boxes[i].half_widths.x < 0.0 {
-					self.box_vels[i].x = -self.box_prev_vels[i].x;
-					qnext = self.shader_state.boxes[i].center + h * self.box_vels[i];
-				}
-				self.box_prev_vels[i] = self.box_vels[i];
-				self.shader_state.boxes[i].center = qnext;
-				self.box_vels[i].x += hg;
-			}
-			 */
-		}
 		// camera update
 		let t = {
-			let t = -0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
+			let t =
+				-0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
 			Translator::new(1.0, t.x, t.y, t.z)
 		};
 		let r = Rotor::new(
@@ -342,6 +290,79 @@ impl AppState {
 			.geometric_product(r)
 			.geometric_product(t)
 			.signum();
+		// physics simulation
+		for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
+			// see https://enki.ws/ganja.js/examples/pga_dyn.html
+			// we use verlet integration instead
+			let d_motion = body.motion.geometric_product(body.rate) * -0.5;
+			body.motion += d_motion * h;
+
+			let forque_gravity = body
+				.motion
+				.reversal()
+				.transformation(self.gravity_accel)
+				.dual();
+			let forque = forque_gravity;
+			dbg!(forque);
+			//let forque = JoinLine::zero();
+			let d_rate = (forque
+				- (body.rate.dual().geometric_product(body.rate)
+					- body.rate.geometric_product(body.rate.dual()))
+				.dual())
+			.dual();
+			// TODO this should be UNDUAL (which depends on the dimension.....)
+			// see eq. 132 here https://geometricalgebra.org/downloads/PGA4CS.pdf
+			// grade(forque)=grade(join line)=d-1 i think?, and (d-1)d is always even
+			// so we probably (?) don't need a negative sign
+			dbg!(d_rate);
+			let bruh = d_rate * h;
+			assert!(bruh[6].abs() < 1e-6);
+			assert!(bruh[7].abs() < 1e-6);
+			body.prev_rate = body.rate;
+			body.rate += (d_rate * h).into();
+			/*
+			let mut mnext = body.motion - body.motion * body.rate * (0.5 * h);
+			match body.shape {
+				// collisions
+				Shape::Sphere(r) => {
+					// ?? do some projection shit
+					let y = body.motion.transformation(ORIGIN).regressive_product(self.floor);
+				}
+				Shape::Box(half_widths) => {
+					// more projection shit
+				}
+			}
+			body.prev_rate = body.rate;
+			body.motion = mnext;
+			// https://enki.ws/ganja.js/examples/pga_dyn.html#Collision_Response
+			body.rate += (body.rate.dual()*body.rate - body.rate*body.rate.dual()).dual().inverse() * -0.5;
+			// body.rate += dbg!(body.motion.reversal().transformation(self.gravity).dual() * h);
+			// wtf
+			 */
+		}
+		/*
+		for i in 0..self.num_spheres {
+			let mut qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
+			if qnext.x < 0.0 {
+				self.sphere_vels[i].x = -self.sphere_prev_vels[i].x;
+				qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
+			}
+			self.sphere_prev_vels[i] = self.sphere_vels[i];
+			self.shader_state.spheres[i].center = qnext;
+			self.sphere_vels[i].x += hg;
+		}
+		for i in 0..self.num_boxes {
+			let mut qnext = self.shader_state.boxes[i].center + h * self.box_vels[i];
+			if qnext.x-self.shader_state.boxes[i].half_widths.x < 0.0 {
+				self.box_vels[i].x = -self.box_prev_vels[i].x;
+				qnext = self.shader_state.boxes[i].center + h * self.box_vels[i];
+			}
+			self.box_prev_vels[i] = self.box_vels[i];
+			self.shader_state.boxes[i].center = qnext;
+			self.box_vels[i].x += hg;
+		}
+		 */
+		// TODO delete bodies that are too far from the camera
 	}
 	fn try_place_body(&mut self) {
 		if self.num_bodies == MAX_BODIES {
@@ -349,7 +370,7 @@ impl AppState {
 		}
 		let rand_color = Vec3::new(rand::random(), rand::random(), rand::random());
 		let motion = self.camera.motion.geometric_product(Translator::new(
-                        1.0,
+			1.0,
 			0.0,
 			-0.5 * self.place_distance,
 			0.0,
@@ -357,12 +378,15 @@ impl AppState {
 		let rand_around_1 = || (rand::random::<f32>() - 0.5) + 1.0;
 		self.bodies[self.num_bodies] = Body {
 			motion,
+			/*
 			rate: motion
 				.reversal()
-                                // TODO why dual? re-read eq. 2.25 from https://bivector.net/PGAdyn.pdf
+				// TODO why dual? re-read eq. 2.25 from https://bivector.net/PGAdyn.pdf
 				.transformation(
-                                    dbg!(BASIS[0].outer_product(BASIS[1]))
-                                ),
+					dbg!(BASIS[1].outer_product(BASIS[0])), // go down
+				),
+						*/
+			rate: MeetLine::zero(),
 			prev_rate: MeetLine::zero(),
 			shape: if rand::random::<f32>() < 0.5 {
 				Shape::Sphere(rand_around_1())
@@ -374,8 +398,7 @@ impl AppState {
 				diffuse: rand_color,
 			},
 		};
-                self.bodies[self.num_bodies].rate = MeetLine::zero(); // TODO DELETE THIS
-                dbg!(&self.bodies[self.num_bodies]);
+		dbg!(&self.bodies[self.num_bodies]);
 		self.num_bodies += 1;
 	}
 	#[cfg(any())]
@@ -405,6 +428,9 @@ impl AppState {
 }
 
 async fn run(event_loop: EventLoop<()>, window: Window) {
+	for i in 0..BASIS.len() {
+		dbg!(dbg!(BASIS[i]).dual());
+	}
 	let mut app_state = AppState {
 		// controls
 		key_plus: BVecN::FALSE,
@@ -414,19 +440,19 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		// physics
 		time: std::time::Instant::now(),
 		speed: 1.0,
-		gravity_accel: dbg!(BASIS[0].outer_product(BASIS[1])) * 10.0,
+		gravity_accel: dbg!(BASIS[0].outer_product(BASIS[1]) * -10.0),
 		place_distance: 4.0,
 		place_shape: Shape::Sphere(1.0),
 		// render
 		camera: dbg!(Camera {
 			motion: Motor::one(),
 			up: BASIS[1].dual(),
-			forward: BASIS[2].dual(), // TODO should this be a plane?
+			forward: BASIS[2].dual(), // TODO should `forward` be a plane?
 			left: BASIS[3].dual(),
-                        // we don't need an additional camera param in 4D
-                        // because the camera window is always 2d
+			// we don't need an additional camera param in 4D
+			// because the camera window is always 2d
 		}),
-		global_light_color: Vec3::ONE * 0.125,
+		global_light_color: Vec3::ONE * 0.25,
 		point_lights: [PointLight {
 			color: Vec3::ONE,
 			position: ORIGIN + BASIS[1].dual() * 128.0,
@@ -631,12 +657,12 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 				Event::WindowEvent { event, .. } => match event {
 					WindowEvent::Resized(new_size) => {
 						// Reconfigure the surface with the new size
-                                                config.width = new_size.width;
-                                                config.height = new_size.height;
-                                                while config.width * config.height > 1048576 {
-                                                    config.width >>= 1;
-                                                    config.height >>= 1;
-                                                }
+						config.width = new_size.width;
+						config.height = new_size.height;
+						while config.width * config.height > 1048576 {
+							config.width >>= 1;
+							config.height >>= 1;
+						}
 						config.width = config.width.max(1);
 						config.height = config.height.max(1);
 						app_state.window_size.width = config.width;
