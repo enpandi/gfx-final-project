@@ -8,7 +8,7 @@ use winit::{
 	},
 	event_loop::EventLoop,
 	keyboard::{KeyCode, PhysicalKey},
-	window::{Window, WindowBuilder},
+	window::{Window, WindowBuilder, Fullscreen},
 };
 
 // switch between 3D and 4D (TODO implement 4D)
@@ -132,29 +132,23 @@ impl From<Camera> for ShaderCamera {
 }
 #[derive(Debug, Clone)]
 struct PointLight {
-	color: Vec3,
 	position: Point,
+	color: Vec3,
 }
 #[derive(Debug, ShaderType)]
 struct ShaderPointLight {
 	#[align(16)]
-	color: Vec3,
-	#[align(16)]
 	position: ShaderPoint,
+	#[align(16)]
+	color: Vec3,
 }
 impl From<PointLight> for ShaderPointLight {
 	fn from(point_light: PointLight) -> Self {
 		Self {
-			color: point_light.color,
 			position: point_light.position.into(),
+			color: point_light.color,
 		}
 	}
-}
-// no need for a separate ShaderMaterial
-#[derive(Clone, Debug, ShaderType)]
-struct Material {
-	ambient: Vec3,
-	diffuse: Vec3,
 }
 #[derive(Clone, Debug)]
 enum Shape {
@@ -184,7 +178,7 @@ struct Body {
 	rate: MeetLine, // template "velocity"
 	prev_rate: MeetLine, // for velocity-based contact resolution?
 	shape: Shape,
-	material: Material,
+	material: Vec3,
 }
 #[derive(Debug, ShaderType)]
 struct ShaderBody {
@@ -193,7 +187,7 @@ struct ShaderBody {
 	#[align(16)]
 	shape: ShaderShape,
 	#[align(16)]
-	material: Material,
+	material: Vec3,
 }
 impl From<Body> for ShaderBody {
 	fn from(body: Body) -> Self {
@@ -225,6 +219,7 @@ struct AppState {
 	num_bodies: usize,
 	bodies: [Body; MAX_BODIES],
 	floor: Plane,
+	floor_color: Vec3,
 }
 #[derive(Debug, ShaderType)]
 struct ShaderState {
@@ -232,6 +227,8 @@ struct ShaderState {
 	camera: ShaderCamera,
 	#[align(16)]
 	global_light_color: Vec3,
+	#[align(16)]
+	floor_color: Vec3,
 	#[align(16)]
 	point_lights: [ShaderPointLight; MAX_POINT_LIGHTS],
 	#[align(16)]
@@ -242,6 +239,7 @@ impl From<&AppState> for ShaderState {
 		Self {
 			camera: ShaderCamera::from(state.camera.clone()),
 			global_light_color: state.global_light_color,
+			floor_color: state.floor_color,
 			point_lights: state.point_lights.clone().map(ShaderPointLight::from),
 			bodies: state.bodies.clone().map(ShaderBody::from),
 		}
@@ -272,16 +270,20 @@ impl AppState {
 		let h = dt.as_secs_f32();
 		// camera update
 		let t = {
-			let t =
-				-0.5 * h * self.speed * (VecN::from(self.key_plus) - VecN::from(self.key_minus));
-			Translator::new(1.0, t.x, t.y, t.z)
+			let mut t = [1.0f32; N + 1];
+			t[..N].copy_from_slice(
+				((-h * self.speed) * (VecN::from(self.key_plus) - VecN::from(self.key_minus)))
+					.as_ref(),
+			);
+			Translator::from(t)
 		};
-		let r = Rotor::new(
-			1.0,
-			self.mouse_delta.x * 1e-3,
-			self.mouse_delta.z * 1e-1,
-			-self.mouse_delta.y * 1e-3,
-		)
+		let r = {
+			let mut r = [1.0f32; N + 1];
+			r[0] = self.mouse_delta.x * 1e-3;
+			r[1] = self.mouse_delta.z * 1e-1;
+			r[2] = -self.mouse_delta.y * 1e-3;
+			Rotor::from(r)
+		}
 		.signum();
 		self.mouse_delta = VecN::ZERO;
 		self.camera.motion = self
@@ -292,17 +294,21 @@ impl AppState {
 			.signum();
 		// physics simulation
 		for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
+			dbg!(&body.motion);
+			if true {
+				break;
+			}
 			// see https://enki.ws/ganja.js/examples/pga_dyn.html
 			// we use verlet integration instead
 			let d_motion = body.motion.geometric_product(body.rate) * -0.5;
 			body.motion += d_motion * h;
 
-			let forque_gravity = body
+			let forque_gravity: JoinLine = body
 				.motion
 				.reversal()
 				.transformation(self.gravity_accel)
 				.dual();
-			let forque = forque_gravity;
+			let forque: JoinLine = forque_gravity;
 			dbg!(forque);
 			//let forque = JoinLine::zero();
 			let d_rate = (forque
@@ -368,12 +374,9 @@ impl AppState {
 		if self.num_bodies == MAX_BODIES {
 			return;
 		}
-		let rand_color = Vec3::new(rand::random(), rand::random(), rand::random());
-		let motion = self.camera.motion.geometric_product(Translator::new(
-			1.0,
-			0.0,
-			-0.5 * self.place_distance,
-			0.0,
+		let motion = dbg!(self.camera.motion.geometric_product(
+			dbg!(Motor::one())
+				- dbg!(BASIS[0].outer_product(BASIS[2]) * (0.5 * self.place_distance))
 		));
 		let rand_around_1 = || (rand::random::<f32>() - 0.5) + 1.0;
 		self.bodies[self.num_bodies] = Body {
@@ -393,37 +396,10 @@ impl AppState {
 			} else {
 				Shape::Box(VecN::from_array(std::array::from_fn(|_| rand_around_1())))
 			},
-			material: Material {
-				ambient: rand_color,
-				diffuse: rand_color,
-			},
+			material: Vec3::new(rand::random(), rand::random(), rand::random()),
 		};
 		dbg!(&self.bodies[self.num_bodies]);
 		self.num_bodies += 1;
-	}
-	#[cfg(any())]
-	fn shader_state(&mut self) -> &ShaderState {
-		let cam_pos = self.camera.transformation(Point::new(1.0, 0.0, 0.0, 0.0));
-		self.shader_state.camera.position = VecN::new(cam_pos[1], cam_pos[2], cam_pos[3]);
-		let cam_up =
-			self.cam
-				.transformation(Point::new(0.0, self.window_size.height as f32, 0.0, 0.0));
-		self.shader_state.camera.up = VecN::new(cam_up[1], cam_up[2], cam_up[3]);
-		let cam_forward = self.camera.transformation(Point::new(
-			0.0,
-			0.0,
-			((self.window_size.width * self.window_size.width
-				+ self.window_size.height * self.window_size.height) as f32)
-				.sqrt() / (0.5 * self.fov).tan(),
-			0.0,
-		));
-		self.shader_state.camera.forward =
-			VecN::new(cam_forward[1], cam_forward[2], cam_forward[3]);
-		let cam_left =
-			self.cam
-				.transformation(Point::new(0.0, 0.0, 0.0, self.window_size.width as f32));
-		self.shader_state.camera.left = VecN::new(cam_left[1], cam_left[2], cam_left[3]);
-		&self.shader_state
 	}
 }
 
@@ -445,7 +421,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		place_shape: Shape::Sphere(1.0),
 		// render
 		camera: dbg!(Camera {
-			motion: Motor::one(),
+			motion: dbg!(Motor::one() - BASIS[0].outer_product(BASIS[1]) * 0.5),
 			up: BASIS[1].dual(),
 			forward: BASIS[2].dual(), // TODO should `forward` be a plane?
 			left: BASIS[3].dual(),
@@ -455,19 +431,17 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		global_light_color: Vec3::ONE * 0.25,
 		point_lights: [PointLight {
 			color: Vec3::ONE,
-			position: ORIGIN + BASIS[1].dual() * 128.0,
+			position: dbg!(ORIGIN + BASIS[1].dual() * 128.0),
 		}; MAX_POINT_LIGHTS],
 		floor: BASIS[1],
+		floor_color: Vec3::ONE * 0.1,
 		num_bodies: 0,
 		bodies: std::array::from_fn(|_| Body {
 			motion: Motor::zero(),
 			rate: MeetLine::zero(),
 			prev_rate: MeetLine::zero(),
 			shape: Shape::None,
-			material: Material {
-				ambient: Vec3::ONE,
-				diffuse: Vec3::ONE,
-			},
+			material: Vec3::ONE,
 		}),
 	};
 	app_state.window_size.width = app_state.window_size.width.max(1);
@@ -579,6 +553,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 
 	let window = &window;
 	window.set_cursor_visible(false);
+    window.set_fullscreen(Some(Fullscreen::Borderless(None)));
 	event_loop
 		.run(move |event, target| {
 			// Have the closure take ownership of the resources.
