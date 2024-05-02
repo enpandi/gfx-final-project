@@ -8,7 +8,7 @@ use winit::{
 	},
 	event_loop::EventLoop,
 	keyboard::{KeyCode, PhysicalKey},
-	window::{Window, WindowBuilder, Fullscreen},
+	window::{Fullscreen, Window, WindowBuilder},
 };
 
 // switch between 3D and 4D (TODO implement 4D)
@@ -204,6 +204,7 @@ struct AppState {
 	// controls
 	key_plus: BVecN,
 	key_minus: BVecN,
+        key_physics: bool,
 	mouse_delta: VecN,
 	window_size: PhysicalSize<u32>,
 	// physics
@@ -292,6 +293,7 @@ impl AppState {
 			.geometric_product(r)
 			.geometric_product(t)
 			.signum();
+                if !self.key_physics { return; }
 		// physics simulation
 		for (i, body) in self.bodies[..self.num_bodies].iter_mut().enumerate() {
 			//dbg!(&body.motion);
@@ -365,16 +367,17 @@ impl AppState {
 		}
 		 */
 		// TODO delete bodies that are too far from the camera
-        let mut new_len = 0;
-        for i in 0..self.num_bodies {
-            let position = VecN::from_array(std::array::from_fn(|e| { -2.0 * self.bodies[i].motion[e] }));
-            if position.length_squared() < 128.0*128.0 {
-                self.bodies[new_len] = self.bodies[i].clone();
-                new_len += 1;
-            }
-        }
-        self.num_bodies = new_len;
-        self.bodies[new_len].shape = Shape::None;
+		let mut new_len = 0;
+		for i in 0..self.num_bodies {
+			let position =
+				VecN::from_array(std::array::from_fn(|e| -2.0 * self.bodies[i].motion[e]));
+			if position.length_squared() < 128.0 * 128.0 {
+				self.bodies[new_len] = self.bodies[i].clone();
+				new_len += 1;
+			}
+		}
+		self.num_bodies = new_len;
+		self.bodies[new_len].shape = Shape::None;
 	}
 	fn try_place_body(&mut self) {
 		if self.num_bodies == MAX_BODIES {
@@ -417,6 +420,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 		// controls
 		key_plus: BVecN::FALSE,
 		key_minus: BVecN::FALSE,
+                key_physics: false,
 		mouse_delta: VecN::ZERO,
 		window_size: window.inner_size(),
 		// physics
@@ -559,7 +563,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 
 	let window = &window;
 	window.set_cursor_visible(false);
-    //window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+	//window.set_fullscreen(Some(Fullscreen::Borderless(None)));
 	event_loop
 		.run(move |event, target| {
 			// Have the closure take ownership of the resources.
@@ -629,6 +633,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 								KeyCode::KeyS => app_state.key_minus.y = pressed,
 								KeyCode::KeyA => app_state.key_plus.z = pressed,
 								KeyCode::KeyD => app_state.key_minus.z = pressed,
+                                                                KeyCode::Enter => app_state.key_physics = pressed,
 								_ => {}
 							}
 						}
@@ -663,7 +668,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 						let dt = time - app_state.time;
 						// dbg!(dt.as_secs_f32().recip());
 						app_state.time = time;
-						app_state.simulate(dt);
+                                                app_state.simulate(dt);
 						let frame = surface
 							.get_current_texture()
 							.expect("Failed to acquire next swap chain texture");
