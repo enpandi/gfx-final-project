@@ -16,3 +16,8 @@ glam = "0.27"
 geometric_algebra = { path = "geometric_algebra" }
 rand = "0.8"
 const_format = "0.2"
+cfg-if = "1.0"
+
+[features]
+default = ["four_d"]
+four_d = []

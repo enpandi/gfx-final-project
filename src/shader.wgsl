@@ -2,7 +2,7 @@ const MARCH_MAX_ITERS = 128;
 const MARCH_EPSILON = 1e-4;
 const MARCH_INF = 1e5;
 
-const SMOOTH_MARCH = true;
+const SMOOTH_MARCH = false;
 const SMOOTH_K = 0.5;
 const SMOOTH_K_INV = 1.0 / SMOOTH_K;
 // direction vectors ("ideal points") square to 0
