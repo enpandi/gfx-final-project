@@ -417,12 +417,6 @@ impl AppState {
 							assert!((contact_point[N] - 1.0).abs() < 1e-4);
 							// eq. 2.25 from https://bivector.net/PGAdyn.pdf
 							contact_forques[i] += contact_point.regressive_product(floor_force * d);
-						} else {
-							panic!();
-							// velocity-based
-							// fake: self.sphere_vels[i].x = -self.sphere_prev_vels[i].x;
-							// fake: qnext = self.shader_state.spheres[i].center + h * self.sphere_vels[i];
-
 							// q[t+1] = q[t] + h[t] * qdot[t] // no collision here
 							// qdot[t+1] = qdot[t] + h[t] * Minv * (F(q[t+1]) + correction_forque)
 							// q[t+2] = q[t+1] + h[t+1] * qdot[t+1] // solve correction_forque such that q[t+2] no collision
@@ -888,7 +882,7 @@ async fn run(event_loop: EventLoop<()>, window: Window) {
 								});
 							rpass.set_pipeline(&render_pipeline);
 							rpass.set_bind_group(0, &bind_group, &[]);
-							rpass.draw(0..3, 0..2);
+							rpass.draw(0..3, 0..1);
 						}
 
 						queue.submit(Some(encoder.finish()));

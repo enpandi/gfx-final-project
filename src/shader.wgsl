@@ -62,9 +62,9 @@ fn vs_main(
     @builtin(vertex_index) in_vertex_index: u32,
     @builtin(instance_index) in_instance_index: u32
 ) -> VertexOutput {
-    let quad_ind = in_vertex_index + in_instance_index;
-    let x = f32(i32(quad_ind & 2) - 1);
-    let y = f32(i32(quad_ind << 1 & 2) - 1);
+    let quad_ind = in_vertex_index;
+    let x = f32(i32(quad_ind << 1 & 4) - 1);
+    let y = f32(i32(quad_ind << 2 & 4) - 1);
     return VertexOutput(vec4(x, y, 0, 1), y, -x);
 }
 
